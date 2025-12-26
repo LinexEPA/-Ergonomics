@@ -206,24 +206,26 @@
 
             <!-- 次要關節力矩卡片 (肩/肘) -->
             <div class="grid grid-cols-2 gap-4">
-                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition-shadow">
+                <!-- 更新：肩膀卡片增加 ID 以便 JS 操作變色 -->
+                <div id="cardShoulder" class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition-all duration-500">
                     <div class="flex justify-between items-start mb-2">
-                        <h3 class="text-xs font-bold text-slate-500 uppercase">肩膀力矩</h3>
-                        <i data-lucide="user" class="w-4 h-4 text-slate-400"></i>
+                        <h3 class="text-xs font-bold uppercase opacity-70">肩膀力矩</h3>
+                        <i data-lucide="user" class="w-4 h-4 opacity-50"></i>
                     </div>
                     <div class="flex items-baseline space-x-1">
-                        <span id="resShoulderM" class="text-2xl font-bold text-slate-700">0</span>
-                        <span class="text-xs text-slate-500">Nm</span>
+                        <span id="resShoulderM" class="text-2xl font-bold">0</span>
+                        <span class="text-xs opacity-70">Nm</span>
                     </div>
                 </div>
-                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition-shadow">
+                <!-- 更新：手肘卡片增加 ID 以便 JS 操作變色 -->
+                <div id="cardElbow" class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition-all duration-500">
                     <div class="flex justify-between items-start mb-2">
-                        <h3 class="text-xs font-bold text-slate-500 uppercase">手肘力矩</h3>
-                        <i data-lucide="move" class="w-4 h-4 text-slate-400"></i>
+                        <h3 class="text-xs font-bold uppercase opacity-70">手肘力矩</h3>
+                        <i data-lucide="move" class="w-4 h-4 opacity-50"></i>
                     </div>
                     <div class="flex items-baseline space-x-1">
-                        <span id="resElbowM" class="text-2xl font-bold text-slate-700">0</span>
-                        <span class="text-xs text-slate-500">Nm</span>
+                        <span id="resElbowM" class="text-2xl font-bold">0</span>
+                        <span class="text-xs opacity-70">Nm</span>
                     </div>
                 </div>
             </div>
@@ -264,6 +266,13 @@
         };
         // 肌肉力臂 (假設值)
         const MOMENT_ARMS = { erectorSpinae: 0.05 }; // 5cm
+
+        // 危險限值定義 (N or Nm)
+        const LIMITS = {
+            spine: { med: 2500, high: 3400 }, // NIOSH
+            shoulder: { med: 30, high: 50 },  // 經驗法則 (Heuristic)
+            elbow: { med: 15, high: 30 }      // 經驗法則 (Heuristic)
+        };
 
         const POINT_NAMES = ['手腕 (Wrist)', '手肘 (Elbow)', '肩膀 (Shoulder)', '髖關節 (Hip)'];
         const POINT_COLORS = ['#fbbf24', '#a855f7', '#3b82f6', '#ef4444']; // 黃, 紫, 藍, 紅
@@ -315,13 +324,15 @@
             dispTrunkAngle: document.getElementById('dispTrunkAngle'),
             dispShoulderAngle: document.getElementById('dispShoulderAngle'),
             
-            // 結果儀表板
+            // 結果儀表板 (含肩膀/手肘卡片)
             scoreCard: document.getElementById('scoreCard'),
             resCompression: document.getElementById('resCompression'),
             iconStatus: document.getElementById('iconStatus'),
             barRisk: document.getElementById('barRisk'),
             textRiskLevel: document.getElementById('textRiskLevel'),
+            cardShoulder: document.getElementById('cardShoulder'),
             resShoulderM: document.getElementById('resShoulderM'),
+            cardElbow: document.getElementById('cardElbow'),
             resElbowM: document.getElementById('resElbowM')
         };
 
@@ -419,7 +430,7 @@
             // 4. 壓力計算 (Compression)
             // 肌肉收縮力 = 力矩 / 肌肉力臂
             const F_muscle = M_l5s1 / MOMENT_ARMS.erectorSpinae;
-            // 脊椎總壓力 = 肌肉力 + 重力垂直分量
+            // 脊椎壓力 = 肌肉力 + 重力垂直分量
             const Total_Mass_Above = effectiveLoadKg + (state.bodyWeight * 0.6);
             const F_gravity_comp = (Total_Mass_Above * g) * Math.cos(angleTrunk);
             const totalCompression = F_muscle + F_gravity_comp;
@@ -430,13 +441,13 @@
                 sMoment: Math.round(M_shoulder),
                 eMoment: Math.round(M_elbow),
                 l5Moment: Math.round(M_l5s1),
-                risk: totalCompression > 3400 ? 'High' : (totalCompression > 2500 ? 'Medium' : 'Low'),
+                risk: totalCompression > LIMITS.spine.high ? 'High' : (totalCompression > LIMITS.spine.med ? 'Medium' : 'Low'),
                 trunkAng: Math.round(angleTrunk * (180/Math.PI)),
                 shoulderAng: Math.round(angleUpperarm * (180/Math.PI))
             };
         }
 
-        // --- 5. UI 更新函式 ---
+        // --- 5. UI 更新函式 (含樣式變更) ---
         function updateUI() {
             const res = calculateDynamics();
 
@@ -444,12 +455,12 @@
             els.dispTrunkAngle.textContent = Math.abs(res.trunkAng) + "°";
             els.dispShoulderAngle.textContent = Math.abs(res.shoulderAng) + "°";
 
-            // 更新結果數字
+            // 更新數字結果
             els.resCompression.innerHTML = `${res.comp} <span class="text-lg font-normal opacity-80">N</span>`;
             els.resShoulderM.textContent = res.sMoment;
             els.resElbowM.textContent = res.eMoment;
 
-            // 更新風險卡片顏色
+            // --- 5a. 更新主風險卡片顏色 (腰椎) ---
             let colorClass = 'bg-emerald-500 border-emerald-600';
             let iconName = 'check-circle';
             if (res.risk === 'Medium') {
@@ -461,9 +472,13 @@
                 iconName = 'alert-triangle';
             }
             els.scoreCard.className = `rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 relative overflow-hidden ${colorClass}`;
-            
-            // 重繪圖示
             els.iconStatus.setAttribute('data-lucide', iconName);
+
+            // --- 5b. 更新肩膀與手肘卡片顏色 (新增功能) ---
+            updateCardStyle(els.cardShoulder, res.sMoment, LIMITS.shoulder.med, LIMITS.shoulder.high);
+            updateCardStyle(els.cardElbow, res.eMoment, LIMITS.elbow.med, LIMITS.elbow.high);
+
+            // 重繪所有圖示
             lucide.createIcons();
 
             // 更新進度條
@@ -480,6 +495,33 @@
             // 更新輸入滑桿數值文字
             els.valLoad.textContent = state.totalLoad;
             els.valShare.textContent = state.partnerShare;
+        }
+
+        // 輔助函式：根據數值更新小卡片樣式
+        function updateCardStyle(element, value, limitMed, limitHigh) {
+            // 安全性檢查：如果元素不存在，直接返回，避免報錯
+            if (!element) return;
+
+            let baseClasses = "rounded-xl shadow-sm border p-4 hover:shadow-md transition-all duration-500";
+            let h3 = element.querySelector('h3');
+            let icon = element.querySelector('i');
+
+            if (value > limitHigh) {
+                // 危險 (紅)
+                element.className = `${baseClasses} bg-red-50 border-red-200 text-red-700`;
+                if (h3) h3.className = "text-xs font-bold uppercase opacity-80 text-red-800";
+                if (icon) icon.className = "w-4 h-4 text-red-500";
+            } else if (value > limitMed) {
+                // 警戒 (黃)
+                element.className = `${baseClasses} bg-yellow-50 border-yellow-200 text-yellow-800`;
+                if (h3) h3.className = "text-xs font-bold uppercase opacity-80 text-yellow-800";
+                if (icon) icon.className = "w-4 h-4 text-yellow-600";
+            } else {
+                // 安全 (白)
+                element.className = `${baseClasses} bg-white border-slate-200 text-slate-800`;
+                if (h3) h3.className = "text-xs font-bold uppercase opacity-70 text-slate-500";
+                if (icon) icon.className = "w-4 h-4 text-slate-400";
+            }
         }
 
         // --- 6. 畫布繪製 ---
