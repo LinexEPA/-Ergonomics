@@ -1,519 +1,656 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Play, Pause, RotateCcw, Activity, AlertTriangle, CheckCircle, Ruler, Calculator, Info, Users, Crosshair, Settings2, User, Move } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
-
-const ErgoLiftApp = () => {
-  const [activeTab, setActiveTab] = useState('video'); // video or calculator
-  
-  // --- Physics Constants & State ---
-  const [mode, setMode] = useState('single'); // 'single' or 'team'
-  const [bodyWeight, setBodyWeight] = useState(70); // kg
-  const [bodyHeight, setBodyHeight] = useState(170); // cm
-  const [totalLoad, setTotalLoad] = useState(10); // kg (Total object weight)
-  const [partnerShare, setPartnerShare] = useState(50); // % (How much partner helps)
-  
-  // Anthropometric Data (Based on Dempster / Winter)
-  const ANTHRO = {
-    forearm: { lenRatio: 0.146, massRatio: 0.016, comRatio: 0.43 }, // Elbow to Wrist
-    upperarm: { lenRatio: 0.186, massRatio: 0.028, comRatio: 0.436 }, // Shoulder to Elbow
-    trunk: { massRatio: 0.578, comRatio: 0.66 } // Head+Arms+Trunk approx
-  };
-  const MOMENT_ARMS = { erectorSpinae: 0.05 }; // 5cm
-  
-  // --- Video Handling State ---
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const [videoSrc, setVideoSrc] = useState(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  
-  // Points: [Wrist, Elbow, Shoulder, Hip]
-  const [points, setPoints] = useState([]); 
-  
-  const POINT_NAMES = ['手腕 (Wrist)', '手肘 (Elbow)', '肩膀 (Shoulder)', '髖關節 (Hip)'];
-  const POINT_COLORS = ['#fbbf24', '#a855f7', '#3b82f6', '#ef4444']; // Yellow, Purple, Blue, Red
-
-  // --- Calculations (Inverse Dynamics) ---
-  const calculationResult = useMemo(() => {
-    // 1. Determine Effective Load
-    const effectiveLoadKg = mode === 'team' 
-        ? totalLoad * (1 - (partnerShare / 100)) 
-        : parseFloat(totalLoad);
-
-    const g = 9.81;
-    
-    // Default / Placeholder values if points are missing
-    if (points.length < 4) {
-        // Fallback for simple calculator mode without video points:
-        // We assume a standard "stoop" lift posture if no video points: 
-        // Trunk 45deg, UpperArm 20deg, Forearm -20deg (approx)
-        // This allows the calculator to show something before video analysis
-        return {
-            totalCompression: 0,
-            sMoment: 0, 
-            eMoment: 0, 
-            l5Moment: 0,
-            riskLevel: 'Low',
-            effectiveLoad: effectiveLoadKg,
-            trunkAng: 0,
-            shoulderAng: 0
-        };
-    }
-
-    const pW = points[0]; // Wrist
-    const pE = points[1]; // Elbow
-    const pS = points[2]; // Shoulder
-    const pH = points[3]; // Hip
-
-    // 2. Geometry & Conversion
-    const H_meters = bodyHeight / 100;
-    
-    // Estimated Segment Lengths (Meters) based on body height
-    const L_forearm = H_meters * ANTHRO.forearm.lenRatio;
-    const L_upperarm = H_meters * ANTHRO.upperarm.lenRatio;
-    const L_trunk = H_meters * 0.3; // Approx trunk length (Shoulder to Hip)
-
-    // Calculate Angles relative to vertical (0 is down)
-    // Canvas Y is positive down.
-    const angleForearm = Math.atan2(pW.x - pE.x, pE.y - pW.y); 
-    const angleUpperarm = Math.atan2(pE.x - pS.x, pS.y - pE.y);
-    const angleTrunk = Math.atan2(pS.x - pH.x, pH.y - pS.y);
-
-    // Angles for Display (Degrees)
-    const trunkAngDeg = Math.round(Math.abs(angleTrunk * (180/Math.PI)));
-    const shoulderAngDeg = Math.round(Math.abs(angleUpperarm * (180/Math.PI)));
-
-    // Horizontal Moment Arms (d = L * sin(theta))
-    const d_forearm_load = Math.abs(L_forearm * Math.sin(angleForearm));
-    const d_forearm_com = Math.abs(L_forearm * ANTHRO.forearm.comRatio * Math.sin(angleForearm));
-    
-    const d_upperarm_elbow = Math.abs(L_upperarm * Math.sin(angleUpperarm));
-    const d_upperarm_com = Math.abs(L_upperarm * ANTHRO.upperarm.comRatio * Math.sin(angleUpperarm));
-
-    const d_trunk_shoulder = Math.abs(L_trunk * Math.sin(angleTrunk));
-    const d_trunk_com = Math.abs(L_trunk * 0.5 * Math.sin(angleTrunk)); // Simplified
-
-    // 3. Step-by-Step Moment Calculation (Top-Down)
-    
-    // A. ELBOW MOMENT
-    const F_load = effectiveLoadKg * g;
-    const F_forearm = (bodyWeight * ANTHRO.forearm.massRatio) * g;
-    const M_elbow = (F_load * d_forearm_load) + (F_forearm * d_forearm_com);
-
-    // B. SHOULDER MOMENT
-    const F_elbow_total = F_load + F_forearm; 
-    const F_upperarm = (bodyWeight * ANTHRO.upperarm.massRatio) * g;
-    const M_shoulder = M_elbow + (F_elbow_total * d_upperarm_elbow) + (F_upperarm * d_upperarm_com);
-
-    // C. L5/S1 MOMENT
-    // Mass above L5S1 minus arms (Head + Trunk) approx 50% BW
-    const F_shoulder_total = F_elbow_total + F_upperarm;
-    const F_trunk = (bodyWeight * 0.50) * g; 
-    const M_l5s1 = M_shoulder + (F_shoulder_total * d_trunk_shoulder) + (F_trunk * d_trunk_com);
-
-    // 4. Compression
-    const F_muscle = M_l5s1 / MOMENT_ARMS.erectorSpinae;
-    // Component of weight acting parallel to spine (Compression)
-    const Total_Mass_Above = effectiveLoadKg + (bodyWeight * 0.6);
-    const F_gravity_comp = (Total_Mass_Above * g) * Math.cos(angleTrunk);
-    
-    const totalCompression = F_muscle + F_gravity_comp;
-    
-    return {
-      totalCompression: Math.round(totalCompression),
-      sMoment: Math.round(M_shoulder),
-      eMoment: Math.round(M_elbow),
-      l5Moment: Math.round(M_l5s1),
-      riskLevel: totalCompression > 3400 ? 'High' : (totalCompression > 2500 ? 'Medium' : 'Low'),
-      effectiveLoad: effectiveLoadKg.toFixed(1),
-      trunkAng: trunkAngDeg,
-      shoulderAng: shoulderAngDeg
-    };
-  }, [mode, totalLoad, partnerShare, bodyWeight, bodyHeight, points]);
-
-  // --- Handlers ---
-
-  const handleFileUpload = (event) => {
-    const file = event.target.files[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setVideoSrc(url);
-      setPoints([]);
-    }
-  };
-
-  const togglePlay = () => {
-    if (videoRef.current) {
-      if (isPlaying) videoRef.current.pause();
-      else videoRef.current.play();
-      setIsPlaying(!isPlaying);
-    }
-  };
-
-  const handleCanvasClick = (e) => {
-    if (!videoSrc) return;
-    if (points.length >= 4) return; // Max 4 points
-
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    const newPoints = [...points, { x, y }];
-    setPoints(newPoints);
-  };
-
-  const resetPoints = () => {
-      setPoints([]);
-  };
-
-  // Draw overlay
-  useEffect(() => {
-    if (!canvasRef.current) return;
-    const ctx = canvasRef.current.getContext('2d');
-    ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-
-    // Draw Lines
-    if (points.length > 1) {
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
-        for(let i=1; i<points.length; i++) {
-            ctx.lineTo(points[i].x, points[i].y);
-        }
-        ctx.strokeStyle = '#fbbf24'; // Amber-400
-        ctx.lineWidth = 3;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.stroke();
-    }
-
-    // Draw Points
-    points.forEach((p, index) => {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
-      ctx.fillStyle = POINT_COLORS[index];
-      ctx.fill();
-      ctx.strokeStyle = 'white';
-      ctx.stroke();
-      
-      // Label
-      ctx.fillStyle = 'white';
-      ctx.font = '12px sans-serif';
-      ctx.shadowColor = "rgba(0,0,0,0.5)";
-      ctx.shadowBlur = 4;
-      ctx.fillText(POINT_NAMES[index], p.x + 10, p.y);
-      ctx.shadowBlur = 0;
-    });
-
-  }, [points, videoSrc]);
-
-  // Sync video size
-  const handleLoadedMetadata = () => {
-    if (videoRef.current && canvasRef.current) {
-      canvasRef.current.width = videoRef.current.videoWidth;
-      canvasRef.current.height = videoRef.current.videoHeight;
-    }
-  };
-
-  // Chart Data
-  const chartData = [
-    { name: '手肘 (Elbow)', moment: calculationResult.eMoment, fill: '#a855f7' },
-    { name: '肩膀 (Shoulder)', moment: calculationResult.sMoment, fill: '#3b82f6' },
-    { name: '腰椎 (L5/S1)', moment: calculationResult.l5Moment, fill: '#10b981' },
-  ];
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
-      {/* Header */}
-      <header className="bg-slate-900 text-white p-4 shadow-md flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          <Activity className="text-blue-400" />
-          <h1 className="text-xl font-bold">ErgoLift Pro <span className="text-xs bg-blue-600 px-2 py-0.5 rounded ml-2">v2.0</span></h1>
-        </div>
-        <div className="text-xs text-slate-400">
-          多關節逆動力學分析 (Inverse Dynamics)
-        </div>
-      </header>
-
-      <main className="container mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ErgoLift Pro: 多關節與協作分析儀 (v2.0)</title>
+    <!-- 引入 Tailwind CSS (樣式) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Chart.js (圖表) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- 引入 Lucide Icons (圖示) -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { font-family: 'Segoe UI', Microsoft JhengHei, sans-serif; }
+        /* 影片容器樣式 */
+        .video-wrapper { position: relative; background: #000; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        video { max-width: 100%; max-height: 100%; display: block; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; }
         
-        {/* Left Column: Input & Video */}
-        <div className="lg:col-span-7 space-y-6">
-          
-          {/* Tabs */}
-          <div className="flex space-x-2 bg-white p-1 rounded-lg shadow-sm border border-slate-200">
-            <button 
-              onClick={() => setActiveTab('video')}
-              className={`flex-1 py-2 px-4 rounded-md flex items-center justify-center space-x-2 transition-colors ${activeTab === 'video' ? 'bg-blue-100 text-blue-700 font-medium' : 'hover:bg-slate-50 text-slate-500'}`}
-            >
-              <Upload size={18} />
-              <span>影片分析</span>
-            </button>
-            <button 
-              onClick={() => setActiveTab('calculator')}
-              className={`flex-1 py-2 px-4 rounded-md flex items-center justify-center space-x-2 transition-colors ${activeTab === 'calculator' ? 'bg-blue-100 text-blue-700 font-medium' : 'hover:bg-slate-50 text-slate-500'}`}
-            >
-              <Calculator size={18} />
-              <span>參數微調</span>
-            </button>
-          </div>
+        /* 自訂滑桿樣式 */
+        input[type=range] { -webkit-appearance: none; background: transparent; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%; margin-top: -6px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; border-radius: 2px; }
+        
+        /* 滑桿顏色定義 */
+        .range-blue::-webkit-slider-thumb { background: #2563eb; }
+        .range-blue::-webkit-slider-runnable-track { background: #bfdbfe; }
+        .range-purple::-webkit-slider-thumb { background: #9333ea; }
+        .range-purple::-webkit-slider-runnable-track { background: #e9d5ff; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
 
-          {/* Video Analyzer Interface */}
-          {activeTab === 'video' && (
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden relative">
-              <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                <h3 className="font-semibold text-slate-700 flex items-center">
-                  <Crosshair className="w-4 h-4 mr-2" />
-                  骨架標記 ({points.length}/4)
-                </h3>
-                <label className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg transition-colors flex items-center">
-                  <Upload size={16} className="mr-2" />
-                  上傳影片
-                  <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
-                </label>
-              </div>
+    <!-- 標題列 -->
+    <header class="bg-slate-900 text-white p-4 shadow-md flex items-center justify-between shrink-0">
+        <div class="flex items-center space-x-2">
+            <i data-lucide="activity" class="text-blue-400"></i>
+            <h1 class="text-xl font-bold">ErgoLift Pro <span class="text-xs bg-blue-600 px-2 py-0.5 rounded ml-2">v2.0</span></h1>
+        </div>
+        <div class="text-xs text-slate-400 hidden md:block">
+            多關節逆動力學分析 (Inverse Dynamics)
+        </div>
+    </header>
 
-              <div className="relative bg-black aspect-video flex items-center justify-center overflow-hidden group">
-                {!videoSrc ? (
-                  <div className="text-slate-400 text-center p-8">
-                    <Users size={48} className="mx-auto mb-4 opacity-50" />
-                    <p>支援雙人搬運 & 多關節分析</p>
-                    <p className="text-sm mt-2 opacity-70">上傳後請依序點擊: 手腕 ➔ 手肘 ➔ 肩膀 ➔ 髖部</p>
-                  </div>
-                ) : (
-                  <div className="relative w-full h-full">
-                    <video 
-                      ref={videoRef}
-                      src={videoSrc}
-                      className="absolute inset-0 w-full h-full object-contain"
-                      onLoadedMetadata={handleLoadedMetadata}
-                      onEnded={() => setIsPlaying(false)}
-                      playsInline
-                    />
-                    <canvas 
-                      ref={canvasRef}
-                      className="absolute inset-0 w-full h-full cursor-crosshair z-10"
-                      onClick={handleCanvasClick}
-                    />
-                    
-                    {/* Floating Guide */}
-                    {points.length < 4 && (
-                        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-black/70 text-white px-4 py-2 rounded-full text-sm font-bold backdrop-blur-sm pointer-events-none transition-all border border-white/20">
-                            請點擊: <span style={{color: POINT_COLORS[points.length]}}>{POINT_NAMES[points.length]}</span>
-                        </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="p-4 flex items-center justify-between bg-slate-50 border-t border-slate-200">
-                <div className="flex space-x-2">
-                  <button onClick={togglePlay} disabled={!videoSrc} className="p-2 bg-slate-200 rounded-full hover:bg-slate-300 disabled:opacity-50">
-                    {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-                  </button>
-                  <button onClick={resetPoints} className="p-2 bg-slate-200 rounded-full hover:bg-slate-300 text-slate-600" title="重置標記">
-                    <RotateCcw size={20} />
-                  </button>
-                </div>
-                <div className="text-sm text-slate-600 text-right">
-                    <div className="text-xs text-slate-400">當前模式</div>
-                    <div className="font-bold text-blue-600">{mode === 'single' ? '單人作業' : '雙人協作'}</div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Manual Input Interface */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-slate-700 flex items-center">
-                <Settings2 className="w-4 h-4 mr-2" />
-                參數設定
-                </h3>
-                <div className="flex bg-slate-100 p-1 rounded-lg">
-                    <button 
-                        onClick={() => setMode('single')}
-                        className={`px-3 py-1 text-sm rounded-md transition-all ${mode === 'single' ? 'bg-white shadow text-blue-600 font-bold' : 'text-slate-500 hover:text-slate-700'}`}
-                    >單人</button>
-                    <button 
-                        onClick={() => setMode('team')}
-                        className={`px-3 py-1 text-sm rounded-md transition-all ${mode === 'team' ? 'bg-white shadow text-purple-600 font-bold' : 'text-slate-500 hover:text-slate-700'}`}
-                    >雙人協作</button>
-                </div>
-            </div>
+    <main class="flex-grow container mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        <!-- 左側：影片與標記區 -->
+        <div class="lg:col-span-7 space-y-6">
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-4">
-                <div className={`p-3 rounded-lg border ${mode === 'team' ? 'bg-purple-50 border-purple-100' : 'bg-blue-50 border-blue-100'}`}>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">
-                      {mode === 'team' ? '總負重 (Total Weight)' : '手中物體重量 (Load Weight)'}
-                  </label>
-                  <div className="flex items-center space-x-4">
-                    <input 
-                      type="range" min="0" max="150" value={totalLoad} 
-                      onChange={(e) => setTotalLoad(Number(e.target.value))}
-                      className={`flex-1 h-2 rounded-lg appearance-none cursor-pointer ${mode === 'team' ? 'bg-purple-200 accent-purple-600' : 'bg-blue-200 accent-blue-600'}`}
-                    />
-                    <span className="w-16 text-right font-mono font-bold text-slate-700">{totalLoad}kg</span>
-                  </div>
+            <!-- 影片分析器卡片 -->
+            <div class="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden flex flex-col">
+                <div class="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                    <h3 class="font-semibold text-slate-700 flex items-center">
+                        <i data-lucide="crosshair" class="w-4 h-4 mr-2"></i> 
+                        <span id="stepIndicator">骨架標記 (0/4)</span>
+                    </h3>
+                    <label class="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg transition-colors flex items-center shadow-sm">
+                        <i data-lucide="upload" class="w-4 h-4 mr-2"></i> 上傳影片
+                        <input type="file" id="videoUpload" accept="video/*" class="hidden">
+                    </label>
                 </div>
 
-                {mode === 'team' && (
-                    <div className="p-3 bg-purple-50 rounded-lg border border-purple-100">
-                        <label className="block text-sm font-bold text-purple-800 mb-1">夥伴分擔比例 (Partner Share)</label>
-                        <div className="flex items-center space-x-4">
-                            <input 
-                            type="range" min="0" max="100" value={partnerShare} 
-                            onChange={(e) => setPartnerShare(Number(e.target.value))}
-                            className="flex-1 h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
-                            />
-                            <span className="w-16 text-right font-mono font-bold text-purple-700">{partnerShare}%</span>
-                        </div>
-                        <p className="text-xs text-purple-600 mt-1">此人實際負重: <strong>{calculationResult.effectiveLoad} kg</strong></p>
+                <!-- 影片顯示區域 -->
+                <div class="aspect-video bg-black relative group">
+                    <!-- 預設提示畫面 -->
+                    <div id="placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                        <i data-lucide="users" class="w-12 h-12 mb-4 opacity-50"></i>
+                        <p class="font-medium">支援雙人搬運 & 多關節分析</p>
+                        <p class="text-sm mt-2 opacity-70">上傳後請依序點擊: 手腕 ➔ 手肘 ➔ 肩膀 ➔ 髖部</p>
                     </div>
-                )}
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">作業者體重 (Body Weight)</label>
-                  <div className="flex items-center space-x-4">
-                    <input 
-                      type="number" value={bodyWeight} 
-                      onChange={(e) => setBodyWeight(Number(e.target.value))}
-                      className="w-full border border-slate-300 rounded px-3 py-1 text-sm"
-                    />
-                    <span className="text-slate-500 text-sm">kg</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">身高 (Height) <span className="text-xs text-slate-400">- 估算臂長用</span></label>
-                  <div className="flex items-center space-x-4">
-                    <input 
-                      type="number" value={bodyHeight} 
-                      onChange={(e) => setBodyHeight(Number(e.target.value))}
-                      className="w-full border border-slate-300 rounded px-3 py-1 text-sm"
-                    />
-                    <span className="text-slate-500 text-sm">cm</span>
-                  </div>
-                </div>
-
-                <div className="pt-2 border-t border-slate-100">
-                    <h4 className="text-xs font-semibold text-slate-500 uppercase mb-2">自動偵測角度</h4>
-                    <div className="grid grid-cols-2 gap-2 text-sm">
-                        <div className="bg-slate-50 p-2 rounded">
-                            <span className="block text-xs text-slate-400">軀幹前彎</span>
-                            <span className="font-mono font-bold text-slate-700">{calculationResult.trunkAng}°</span>
-                        </div>
-                        <div className="bg-slate-50 p-2 rounded">
-                            <span className="block text-xs text-slate-400">上臂抬舉</span>
-                            <span className="font-mono font-bold text-slate-700">{calculationResult.shoulderAng}°</span>
+                    
+                    <!-- 實際影片容器 -->
+                    <div id="videoContainer" class="hidden w-full h-full relative video-wrapper">
+                        <video id="mainVideo" playsinline></video>
+                        <canvas id="mainCanvas"></canvas>
+                        
+                        <!-- 點擊提示浮動標籤 -->
+                        <div id="clickGuide" class="absolute top-4 left-1/2 transform -translate-x-1/2 bg-black/80 text-white px-4 py-2 rounded-full text-sm font-bold backdrop-blur-sm pointer-events-none hidden border border-white/20 transition-all z-20 shadow-lg">
+                            請點擊: <span id="currentPointName" class="text-yellow-400">手腕</span>
                         </div>
                     </div>
                 </div>
-              </div>
-            </div>
-          </div>
-        </div>
 
-        {/* Right Column: Results & Dashboard */}
-        <div className="lg:col-span-5 space-y-6">
-          
-          {/* Main Score Card */}
-          <div className={`rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 relative overflow-hidden ${
-            calculationResult.riskLevel === 'High' ? 'bg-red-500 border-red-600' : 
-            calculationResult.riskLevel === 'Medium' ? 'bg-yellow-500 border-yellow-600' : 
-            'bg-emerald-500 border-emerald-600'
-          }`}>
-            <div className="relative z-10">
-                <div className="flex justify-between items-start mb-4">
-                <div>
-                    <h2 className="text-3xl font-bold">{calculationResult.totalCompression} N</h2>
-                    <p className="text-white/90 text-sm font-medium mt-1">L5/S1 椎間盤預估壓力</p>
-                </div>
-                <div className="bg-white/20 p-2 rounded-full backdrop-blur-sm">
-                    {calculationResult.riskLevel === 'High' ? <AlertTriangle size={32} /> : <CheckCircle size={32} />}
-                </div>
-                </div>
-
-                <div className="space-y-2">
-                <div className="flex justify-between text-sm">
-                    <span className="text-white/80">NIOSH 安全上限:</span>
-                    <span className="font-mono">3,400 N</span>
-                </div>
-                <div className="w-full bg-black/20 rounded-full h-2">
-                    <div 
-                    className="bg-white h-2 rounded-full transition-all duration-500"
-                    style={{ width: `${Math.min((calculationResult.totalCompression / 6000) * 100, 100)}%` }}
-                    ></div>
-                </div>
-                <div className="flex justify-between items-center pt-2">
-                    <span className="font-bold uppercase tracking-wider text-sm">{calculationResult.riskLevel} RISK</span>
-                </div>
+                <!-- 播放控制列 -->
+                <div class="p-4 flex items-center justify-between bg-slate-50 border-t border-slate-200">
+                    <div class="flex space-x-2">
+                        <button id="btnPlayPause" class="p-2 bg-slate-200 rounded-full hover:bg-slate-300 disabled:opacity-50 transition-colors" disabled>
+                            <i data-lucide="play" class="w-5 h-5"></i>
+                        </button>
+                        <button id="btnReset" class="p-2 bg-slate-200 rounded-full hover:bg-slate-300 text-slate-600 transition-colors" title="重置標記">
+                            <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
+                        </button>
+                    </div>
+                    <div class="text-xs text-slate-500 text-right">
+                        <div class="text-[10px] uppercase text-slate-400">當前模式</div>
+                        <div id="modeDisplay" class="font-bold text-blue-600">單人作業</div>
+                    </div>
                 </div>
             </div>
-          </div>
 
-          {/* Multi-Joint Cards */}
-          <div className="grid grid-cols-2 gap-4">
-                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-                    <div className="flex justify-between items-start mb-1">
-                        <h3 className="text-xs font-bold text-slate-500 uppercase">肩關節力矩</h3>
-                        <User className="w-4 h-4 text-slate-400" />
-                    </div>
-                    <div className="flex items-baseline space-x-1">
-                        <span className="text-2xl font-bold text-slate-700">{calculationResult.sMoment}</span>
-                        <span className="text-xs text-slate-500">Nm</span>
+            <!-- 參數設定面板 -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h3 class="font-semibold text-slate-700 flex items-center">
+                        <i data-lucide="settings-2" class="w-4 h-4 mr-2"></i> 參數設定
+                    </h3>
+                    <!-- 單人/雙人模式切換 -->
+                    <div class="flex bg-slate-100 p-1 rounded-lg">
+                        <button id="btnModeSingle" class="px-4 py-1.5 text-sm rounded-md transition-all font-medium bg-white shadow-sm text-blue-600">單人</button>
+                        <button id="btnModeTeam" class="px-4 py-1.5 text-sm rounded-md transition-all font-medium text-slate-500 hover:text-slate-700">雙人協作</button>
                     </div>
                 </div>
-                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-                    <div className="flex justify-between items-start mb-1">
-                        <h3 className="text-xs font-bold text-slate-500 uppercase">肘關節力矩</h3>
-                        <Move className="w-4 h-4 text-slate-400" />
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- 左欄：負重相關 -->
+                    <div class="space-y-5">
+                        <!-- 負重輸入 (會根據模式變色) -->
+                        <div id="loadInputContainer" class="p-4 rounded-lg border bg-blue-50 border-blue-100 transition-colors">
+                            <label id="labelLoad" class="block text-sm font-bold text-slate-700 mb-2">手中物體重量 (Load Weight)</label>
+                            <div class="flex items-center space-x-4">
+                                <input type="range" id="inputLoad" min="0" max="150" value="10" class="flex-1 range-blue">
+                                <span class="w-16 text-right font-mono font-bold text-slate-700 text-lg"><span id="valLoad">10</span>kg</span>
+                            </div>
+                        </div>
+
+                        <!-- 雙人協作滑桿 (預設隱藏) -->
+                        <div id="teamShareContainer" class="p-4 bg-purple-50 rounded-lg border border-purple-100 hidden">
+                            <label class="block text-sm font-bold text-purple-800 mb-2">夥伴分擔比例 (Partner Share)</label>
+                            <div class="flex items-center space-x-4">
+                                <input type="range" id="inputShare" min="0" max="100" value="50" class="flex-1 range-purple">
+                                <span class="w-16 text-right font-mono font-bold text-purple-700 text-lg"><span id="valShare">50</span>%</span>
+                            </div>
+                            <p class="text-xs text-purple-600 mt-2 text-right border-t border-purple-200 pt-2">
+                                您實際負重: <strong class="text-base"><span id="valEffectiveLoad">5.0</span> kg</strong>
+                            </p>
+                        </div>
                     </div>
-                    <div className="flex items-baseline space-x-1">
-                        <span className="text-2xl font-bold text-slate-700">{calculationResult.eMoment}</span>
-                        <span className="text-xs text-slate-500">Nm</span>
+
+                    <!-- 右欄：人體參數 -->
+                    <div class="space-y-5">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 mb-1">作業者體重 (Body Weight)</label>
+                            <div class="flex items-center space-x-2">
+                                <input type="number" id="inputBody" value="70" class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-shadow">
+                                <span class="text-slate-500 text-sm w-8">kg</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 mb-1">身高 (Height) <span class="text-xs text-slate-400">- 用於估算力臂長度</span></label>
+                            <div class="flex items-center space-x-2">
+                                <input type="number" id="inputHeight" value="170" class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-shadow">
+                                <span class="text-slate-500 text-sm w-8">cm</span>
+                            </div>
+                        </div>
+
+                        <div class="pt-4 border-t border-slate-100">
+                            <h4 class="text-xs font-semibold text-slate-500 uppercase mb-2">自動偵測角度</h4>
+                            <div class="grid grid-cols-2 gap-3 text-sm">
+                                <div class="bg-slate-50 p-2 rounded border border-slate-100">
+                                    <span class="block text-xs text-slate-400 mb-1">軀幹前彎</span>
+                                    <span id="dispTrunkAngle" class="font-mono font-bold text-slate-700 text-lg">0°</span>
+                                </div>
+                                <div class="bg-slate-50 p-2 rounded border border-slate-100">
+                                    <span class="block text-xs text-slate-400 mb-1">上臂抬舉</span>
+                                    <span id="dispShoulderAngle" class="font-mono font-bold text-slate-700 text-lg">0°</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-          </div>
+            </div>
+        </div>
 
-          {/* Chart */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 h-64">
-            <h3 className="font-semibold text-slate-700 mb-2 text-xs">各部位力矩分佈 (Joint Moments)</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                <XAxis dataKey="name" tick={{fontSize: 10}} />
-                <YAxis tick={{fontSize: 10}} label={{ value: '力矩 (Nm)', angle: -90, position: 'insideLeft', fontSize: 10 }} />
-                <Tooltip 
-                  cursor={{fill: 'transparent'}}
-                  contentStyle={{backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '12px'}}
-                />
-                <Bar dataKey="moment" radius={[4, 4, 0, 0]}>
-                    {chartData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.fill} />
-                    ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-          
-          <div className="bg-blue-50 p-4 rounded-lg flex items-start space-x-3">
-             <Info className="text-blue-500 flex-shrink-0 mt-1" size={18} />
-             <div className="text-xs text-blue-800 leading-relaxed">
-               <strong>計算原理：</strong> 採用由外向內 (Top-Down) 的逆動力學計算。
-               <ul className="list-disc pl-4 mt-1 opacity-80">
-                   <li>手部受力 ➔ 計算肘部力矩</li>
-                   <li>肘部力矩 + 上臂重 ➔ 計算肩部力矩</li>
-                   <li>肩部力矩 + 軀幹重 ➔ 計算腰椎力矩</li>
-               </ul>
-             </div>
-          </div>
+        <!-- 右側：結果儀表板 -->
+        <div class="lg:col-span-5 space-y-6">
+            
+            <!-- 主要結果卡片 (L5/S1 壓力) -->
+            <div id="scoreCard" class="rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 bg-emerald-500 border-emerald-600 relative overflow-hidden">
+                <div class="relative z-10">
+                    <div class="flex justify-between items-start mb-2">
+                        <div>
+                            <h2 id="resCompression" class="text-4xl font-bold">0 <span class="text-lg font-normal opacity-80">N</span></h2>
+                            <p class="text-white/90 text-sm font-medium mt-1">L5/S1 椎間盤預估壓力</p>
+                        </div>
+                        <div class="bg-white/20 p-2 rounded-full backdrop-blur-sm shadow-inner">
+                            <i id="iconStatus" data-lucide="check-circle" class="w-8 h-8"></i>
+                        </div>
+                    </div>
+
+                    <div class="space-y-3 mt-4">
+                        <div class="flex justify-between text-xs font-medium opacity-90">
+                            <span>目前風險等級</span>
+                            <span>NIOSH 限值: 3400N</span>
+                        </div>
+                        <!-- 風險進度條 -->
+                        <div class="w-full bg-black/20 rounded-full h-2">
+                            <div id="barRisk" class="bg-white h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span id="textRiskLevel" class="font-bold uppercase tracking-wider text-sm">LOW RISK</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 次要關節力矩卡片 (肩/肘) -->
+            <div class="grid grid-cols-2 gap-4">
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition-shadow">
+                    <div class="flex justify-between items-start mb-2">
+                        <h3 class="text-xs font-bold text-slate-500 uppercase">肩膀力矩</h3>
+                        <i data-lucide="user" class="w-4 h-4 text-slate-400"></i>
+                    </div>
+                    <div class="flex items-baseline space-x-1">
+                        <span id="resShoulderM" class="text-2xl font-bold text-slate-700">0</span>
+                        <span class="text-xs text-slate-500">Nm</span>
+                    </div>
+                </div>
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition-shadow">
+                    <div class="flex justify-between items-start mb-2">
+                        <h3 class="text-xs font-bold text-slate-500 uppercase">手肘力矩</h3>
+                        <i data-lucide="move" class="w-4 h-4 text-slate-400"></i>
+                    </div>
+                    <div class="flex items-baseline space-x-1">
+                        <span id="resElbowM" class="text-2xl font-bold text-slate-700">0</span>
+                        <span class="text-xs text-slate-500">Nm</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 圖表區域 -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex flex-col h-64">
+                <h3 class="font-semibold text-slate-700 mb-2 text-xs flex justify-between items-center">
+                    <span>各部位力矩分佈 (Joint Moments)</span>
+                </h3>
+                <div class="flex-grow relative w-full h-full">
+                    <canvas id="chartJoints"></canvas>
+                </div>
+            </div>
+
+            <!-- 說明區塊 -->
+            <div class="bg-blue-50 p-4 rounded-lg text-xs text-blue-800 leading-relaxed border border-blue-100 flex items-start space-x-2">
+                <i data-lucide="info" class="w-4 h-4 mt-0.5 flex-shrink-0"></i>
+                <div>
+                    <strong class="block mb-1">計算原理 (Top-Down Inverse Dynamics)：</strong>
+                    <ul class="list-disc pl-4 space-y-1 opacity-80">
+                        <li>手部受力 ➔ 計算肘部力矩</li>
+                        <li>肘部力矩 + 上臂重 ➔ 計算肩部力矩</li>
+                        <li>肩部力矩 + 軀幹重 ➔ 計算腰椎力矩</li>
+                    </ul>
+                </div>
+            </div>
 
         </div>
-      </main>
-    </div>
-  );
-};
+    </main>
 
-export default ErgoLiftApp;
+    <script>
+        // --- 1. 全域變數與人體測量常數 ---
+        // 肢段參數 (Dempster / Winter 模型)
+        const ANTHRO = {
+            forearm: { lenRatio: 0.146, massRatio: 0.016, comRatio: 0.43 }, // 前臂
+            upperarm: { lenRatio: 0.186, massRatio: 0.028, comRatio: 0.436 }, // 上臂
+            trunk: { massRatio: 0.578, comRatio: 0.66 } // 軀幹 (HAT簡化模型參數)
+        };
+        // 肌肉力臂 (假設值)
+        const MOMENT_ARMS = { erectorSpinae: 0.05 }; // 5cm
+
+        const POINT_NAMES = ['手腕 (Wrist)', '手肘 (Elbow)', '肩膀 (Shoulder)', '髖關節 (Hip)'];
+        const POINT_COLORS = ['#fbbf24', '#a855f7', '#3b82f6', '#ef4444']; // 黃, 紫, 藍, 紅
+
+        // 應用程式狀態
+        const state = {
+            mode: 'single', // 'single' 或 'team'
+            totalLoad: 10,
+            partnerShare: 50,
+            bodyHeight: 170,
+            bodyWeight: 70,
+            videoSrc: null,
+            points: [], // 存放座標 [{x,y}, ...]
+            isPlaying: false
+        };
+
+        // --- 2. 獲取 DOM 元素 ---
+        const els = {
+            // 影片操作區
+            videoUpload: document.getElementById('videoUpload'),
+            videoContainer: document.getElementById('videoContainer'),
+            placeholder: document.getElementById('placeholder'),
+            mainVideo: document.getElementById('mainVideo'),
+            mainCanvas: document.getElementById('mainCanvas'),
+            btnPlayPause: document.getElementById('btnPlayPause'),
+            btnReset: document.getElementById('btnReset'),
+            clickGuide: document.getElementById('clickGuide'),
+            currentPointName: document.getElementById('currentPointName'),
+            stepIndicator: document.getElementById('stepIndicator'),
+            
+            // 模式切換
+            btnModeSingle: document.getElementById('btnModeSingle'),
+            btnModeTeam: document.getElementById('btnModeTeam'),
+            modeDisplay: document.getElementById('modeDisplay'),
+            
+            // 參數輸入區
+            loadInputContainer: document.getElementById('loadInputContainer'),
+            labelLoad: document.getElementById('labelLoad'),
+            teamShareContainer: document.getElementById('teamShareContainer'),
+            inputLoad: document.getElementById('inputLoad'),
+            valLoad: document.getElementById('valLoad'),
+            inputShare: document.getElementById('inputShare'),
+            valShare: document.getElementById('valShare'),
+            valEffectiveLoad: document.getElementById('valEffectiveLoad'),
+            inputBody: document.getElementById('inputBody'),
+            inputHeight: document.getElementById('inputHeight'),
+            
+            // 角度顯示
+            dispTrunkAngle: document.getElementById('dispTrunkAngle'),
+            dispShoulderAngle: document.getElementById('dispShoulderAngle'),
+            
+            // 結果儀表板
+            scoreCard: document.getElementById('scoreCard'),
+            resCompression: document.getElementById('resCompression'),
+            iconStatus: document.getElementById('iconStatus'),
+            barRisk: document.getElementById('barRisk'),
+            textRiskLevel: document.getElementById('textRiskLevel'),
+            resShoulderM: document.getElementById('resShoulderM'),
+            resElbowM: document.getElementById('resElbowM')
+        };
+
+        // --- 3. 初始化圖表 (Chart.js) ---
+        let jointChart;
+        function initChart() {
+            const ctx = document.getElementById('chartJoints').getContext('2d');
+            jointChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['手肘', '肩膀', '腰椎'],
+                    datasets: [{
+                        label: '力矩 (Nm)',
+                        data: [0, 0, 0],
+                        backgroundColor: ['#d8b4fe', '#93c5fd', '#6ee7b7'],
+                        borderColor: ['#a855f7', '#3b82f6', '#10b981'],
+                        borderWidth: 1,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, title: { display: true, text: '力矩 (Nm)' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        // --- 4. 物理計算核心 (逆動力學 Inverse Dynamics) ---
+        function calculateDynamics() {
+            // 1. 計算有效負重 (考慮是否雙人分擔)
+            const effectiveLoadKg = state.mode === 'team' 
+                ? state.totalLoad * (1 - (state.partnerShare / 100)) 
+                : state.totalLoad;
+            
+            // 更新 UI 顯示實際負重
+            if(els.valEffectiveLoad) els.valEffectiveLoad.textContent = effectiveLoadKg.toFixed(1);
+
+            // 若點數不足 4 點，回傳歸零數據
+            if (state.points.length < 4) return { 
+                comp: 0, sMoment: 0, eMoment: 0, l5Moment: 0, risk: 'Low', trunkAng: 0, shoulderAng: 0 
+            };
+
+            const pW = state.points[0]; // 手腕
+            const pE = state.points[1]; // 手肘
+            const pS = state.points[2]; // 肩膀
+            const pH = state.points[3]; // 髖部
+            
+            // 2. 幾何計算 (像素轉公尺)
+            // 利用使用者輸入的身高與人體肢段比例，來估算真實長度
+            const H_meters = state.bodyHeight / 100;
+            const L_forearm = H_meters * ANTHRO.forearm.lenRatio;
+            const L_upperarm = H_meters * ANTHRO.upperarm.lenRatio;
+            const L_trunk = H_meters * 0.3; // 估計軀幹長
+
+            // 計算角度 (相對垂直線)
+            // Canvas Y 軸向下增加，利用 atan2 計算兩點間的向量角度
+            const angleForearm = Math.atan2(pW.x - pE.x, pE.y - pW.y); 
+            const angleUpperarm = Math.atan2(pE.x - pS.x, pS.y - pE.y);
+            const angleTrunk = Math.atan2(pS.x - pH.x, pH.y - pS.y);
+
+            // 水平力臂長度 (Moment Arm) d = L * sin(theta)
+            // 取絕對值確保力矩計算正確
+            const d_forearm_load = Math.abs(L_forearm * Math.sin(angleForearm));
+            const d_forearm_com = Math.abs(L_forearm * ANTHRO.forearm.comRatio * Math.sin(angleForearm));
+            
+            const d_upperarm_elbow = Math.abs(L_upperarm * Math.sin(angleUpperarm));
+            const d_upperarm_com = Math.abs(L_upperarm * ANTHRO.upperarm.comRatio * Math.sin(angleUpperarm));
+
+            const d_trunk_shoulder = Math.abs(L_trunk * Math.sin(angleTrunk));
+            const d_trunk_com = Math.abs(L_trunk * 0.5 * Math.sin(angleTrunk));
+
+            const g = 9.81;
+
+            // 3. 逐層計算力矩 (由外向內)
+            
+            // A. 手肘力矩 (Elbow Moment)
+            const F_load = effectiveLoadKg * g;
+            const F_forearm = (state.bodyWeight * ANTHRO.forearm.massRatio) * g;
+            const M_elbow = (F_load * d_forearm_load) + (F_forearm * d_forearm_com);
+
+            // B. 肩膀力矩 (Shoulder Moment)
+            const F_elbow_total = F_load + F_forearm; // 掛在手肘的總重
+            const F_upperarm = (state.bodyWeight * ANTHRO.upperarm.massRatio) * g;
+            const M_shoulder = M_elbow + (F_elbow_total * d_upperarm_elbow) + (F_upperarm * d_upperarm_com);
+
+            // C. 腰椎力矩 (L5/S1 Moment)
+            const F_shoulder_total = F_elbow_total + F_upperarm;
+            const F_trunk = (state.bodyWeight * 0.50) * g; // 估計頭+軀幹重
+            const M_l5s1 = M_shoulder + (F_shoulder_total * d_trunk_shoulder) + (F_trunk * d_trunk_com);
+
+            // 4. 壓力計算 (Compression)
+            // 肌肉收縮力 = 力矩 / 肌肉力臂
+            const F_muscle = M_l5s1 / MOMENT_ARMS.erectorSpinae;
+            // 脊椎總壓力 = 肌肉力 + 重力垂直分量
+            const Total_Mass_Above = effectiveLoadKg + (state.bodyWeight * 0.6);
+            const F_gravity_comp = (Total_Mass_Above * g) * Math.cos(angleTrunk);
+            const totalCompression = F_muscle + F_gravity_comp;
+
+            // 5. 回傳結果
+            return {
+                comp: Math.round(totalCompression),
+                sMoment: Math.round(M_shoulder),
+                eMoment: Math.round(M_elbow),
+                l5Moment: Math.round(M_l5s1),
+                risk: totalCompression > 3400 ? 'High' : (totalCompression > 2500 ? 'Medium' : 'Low'),
+                trunkAng: Math.round(angleTrunk * (180/Math.PI)),
+                shoulderAng: Math.round(angleUpperarm * (180/Math.PI))
+            };
+        }
+
+        // --- 5. UI 更新函式 ---
+        function updateUI() {
+            const res = calculateDynamics();
+
+            // 更新角度文字
+            els.dispTrunkAngle.textContent = Math.abs(res.trunkAng) + "°";
+            els.dispShoulderAngle.textContent = Math.abs(res.shoulderAng) + "°";
+
+            // 更新結果數字
+            els.resCompression.innerHTML = `${res.comp} <span class="text-lg font-normal opacity-80">N</span>`;
+            els.resShoulderM.textContent = res.sMoment;
+            els.resElbowM.textContent = res.eMoment;
+
+            // 更新風險卡片顏色
+            let colorClass = 'bg-emerald-500 border-emerald-600';
+            let iconName = 'check-circle';
+            if (res.risk === 'Medium') {
+                colorClass = 'bg-yellow-500 border-yellow-600';
+                iconName = 'alert-circle';
+            }
+            if (res.risk === 'High') {
+                colorClass = 'bg-red-500 border-red-600';
+                iconName = 'alert-triangle';
+            }
+            els.scoreCard.className = `rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 relative overflow-hidden ${colorClass}`;
+            
+            // 重繪圖示
+            els.iconStatus.setAttribute('data-lucide', iconName);
+            lucide.createIcons();
+
+            // 更新進度條
+            const pct = Math.min((res.comp / 6000) * 100, 100);
+            els.barRisk.style.width = `${pct}%`;
+            els.textRiskLevel.textContent = `${res.risk} RISK`;
+
+            // 更新圖表數據
+            if (jointChart) {
+                jointChart.data.datasets[0].data = [res.eMoment, res.sMoment, res.l5Moment];
+                jointChart.update();
+            }
+
+            // 更新輸入滑桿數值文字
+            els.valLoad.textContent = state.totalLoad;
+            els.valShare.textContent = state.partnerShare;
+        }
+
+        // --- 6. 畫布繪製 ---
+        function drawCanvas() {
+            const ctx = els.mainCanvas.getContext('2d');
+            ctx.clearRect(0, 0, els.mainCanvas.width, els.mainCanvas.height);
+
+            // 畫連接線
+            if (state.points.length > 1) {
+                ctx.beginPath();
+                ctx.moveTo(state.points[0].x, state.points[0].y);
+                for(let i=1; i<state.points.length; i++) {
+                    ctx.lineTo(state.points[i].x, state.points[i].y);
+                }
+                ctx.strokeStyle = '#fbbf24'; // 黃色
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.stroke();
+            }
+
+            // 畫關鍵點
+            state.points.forEach((p, idx) => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
+                ctx.fillStyle = POINT_COLORS[idx];
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // 標籤文字
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 14px sans-serif';
+                ctx.shadowColor="rgba(0,0,0,0.5)";
+                ctx.shadowBlur=4;
+                ctx.fillText(POINT_NAMES[idx], p.x + 12, p.y + 4);
+                ctx.shadowBlur=0;
+            });
+        }
+
+        // --- 7. 事件監聽設定 ---
+        
+        // 模式切換邏輯
+        function setMode(newMode) {
+            state.mode = newMode;
+            els.modeDisplay.textContent = newMode === 'single' ? '單人作業' : '雙人協作';
+            
+            if (newMode === 'single') {
+                // 單人模式樣式
+                els.btnModeSingle.className = "px-4 py-1.5 text-sm rounded-md transition-all font-medium bg-white shadow-sm text-blue-600";
+                els.btnModeTeam.className = "px-4 py-1.5 text-sm rounded-md transition-all font-medium text-slate-500 hover:text-slate-700";
+                
+                els.teamShareContainer.classList.add('hidden');
+                els.loadInputContainer.className = "p-4 rounded-lg border bg-blue-50 border-blue-100 transition-colors";
+                els.labelLoad.textContent = "手中物體重量 (Load Weight)";
+                els.labelLoad.className = "block text-sm font-bold text-blue-800 mb-2";
+                els.inputLoad.className = "flex-1 range-blue";
+            } else {
+                // 雙人模式樣式
+                els.btnModeTeam.className = "px-4 py-1.5 text-sm rounded-md transition-all font-medium bg-white shadow-sm text-purple-600";
+                els.btnModeSingle.className = "px-4 py-1.5 text-sm rounded-md transition-all font-medium text-slate-500 hover:text-slate-700";
+                
+                els.teamShareContainer.classList.remove('hidden');
+                els.loadInputContainer.className = "p-4 rounded-lg border bg-purple-50 border-purple-100 transition-colors";
+                els.labelLoad.textContent = "總負重 (Total Weight)";
+                els.labelLoad.className = "block text-sm font-bold text-purple-800 mb-2";
+                els.inputLoad.className = "flex-1 range-purple";
+            }
+            updateUI();
+        }
+
+        els.btnModeSingle.addEventListener('click', () => setMode('single'));
+        els.btnModeTeam.addEventListener('click', () => setMode('team'));
+
+        // 影片上傳
+        els.videoUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const url = URL.createObjectURL(file);
+            state.videoSrc = url;
+            els.mainVideo.src = url;
+            
+            els.placeholder.classList.add('hidden');
+            els.videoContainer.classList.remove('hidden');
+            els.btnPlayPause.disabled = false;
+            
+            // 重置狀態
+            state.points = [];
+            state.isPlaying = false;
+            updateClickGuide();
+            drawCanvas();
+            updateUI();
+        });
+
+        // 影片載入後設定 Canvas 大小
+        els.mainVideo.addEventListener('loadedmetadata', () => {
+            els.mainCanvas.width = els.mainVideo.videoWidth;
+            els.mainCanvas.height = els.mainVideo.videoHeight;
+        });
+
+        // 播放按鈕
+        els.btnPlayPause.addEventListener('click', () => {
+            if (state.isPlaying) {
+                els.mainVideo.pause();
+                els.btnPlayPause.innerHTML = '<i data-lucide="play" class="w-5 h-5"></i>';
+            } else {
+                els.mainVideo.play();
+                els.btnPlayPause.innerHTML = '<i data-lucide="pause" class="w-5 h-5"></i>';
+            }
+            state.isPlaying = !state.isPlaying;
+            lucide.createIcons();
+        });
+
+        els.mainVideo.addEventListener('ended', () => {
+            state.isPlaying = false;
+            els.btnPlayPause.innerHTML = '<i data-lucide="play" class="w-5 h-5"></i>';
+            lucide.createIcons();
+        });
+
+        // Canvas 點擊標記
+        els.mainCanvas.addEventListener('click', (e) => {
+            if (state.points.length >= 4) return;
+
+            const rect = els.mainCanvas.getBoundingClientRect();
+            // 計算縮放
+            const scaleX = els.mainCanvas.width / rect.width;
+            const scaleY = els.mainCanvas.height / rect.height;
+            
+            const x = (e.clientX - rect.left) * scaleX;
+            const y = (e.clientY - rect.top) * scaleY;
+
+            state.points.push({x, y});
+            drawCanvas();
+            updateClickGuide();
+            updateUI();
+        });
+
+        // 更新點擊提示狀態
+        function updateClickGuide() {
+            const idx = state.points.length;
+            els.stepIndicator.textContent = `骨架標記 (${idx}/4)`;
+            
+            if (idx < 4) {
+                els.clickGuide.classList.remove('hidden');
+                els.currentPointName.textContent = POINT_NAMES[idx];
+                els.currentPointName.style.color = POINT_COLORS[idx];
+            } else {
+                els.clickGuide.classList.add('hidden');
+            }
+        }
+
+        // 重置按鈕
+        els.btnReset.addEventListener('click', () => {
+            state.points = [];
+            drawCanvas();
+            updateClickGuide();
+            updateUI();
+        });
+
+        // 參數輸入變更監聽
+        els.inputLoad.addEventListener('input', (e) => { state.totalLoad = parseFloat(e.target.value); updateUI(); });
+        els.inputShare.addEventListener('input', (e) => { state.partnerShare = parseFloat(e.target.value); updateUI(); });
+        els.inputBody.addEventListener('change', (e) => { state.bodyWeight = parseFloat(e.target.value); updateUI(); });
+        els.inputHeight.addEventListener('change', (e) => { state.bodyHeight = parseFloat(e.target.value); updateUI(); });
+
+        // 初始化
+        lucide.createIcons();
+        initChart();
+        updateUI();
+
+    </script>
+</body>
+</html>
