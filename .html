@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ErgoLift 智慧人因負荷分析儀 (Portable)</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js for graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { font-family: 'Segoe UI', Microsoft JhengHei, sans-serif; }
+        .canvas-container { position: relative; width: 100%; height: 100%; background: #000; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; }
+        /* Custom range slider styling */
+        input[type=range] { -webkit-appearance: none; background: transparent; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%; background: #2563eb; margin-top: -6px; cursor: pointer; }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; background: #e2e8f0; border-radius: 2px; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+
+    <!-- Header -->
+    <header class="bg-slate-900 text-white p-4 shadow-md flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+            <i data-lucide="activity" class="text-blue-400"></i>
+            <h1 class="text-xl font-bold">ErgoLift 智慧人因負荷分析儀</h1>
+        </div>
+        <div class="text-xs text-slate-400 hidden md:block">
+            L5/S1 脊椎受力分析 (Standalone Version)
+        </div>
+    </header>
+
+    <main class="container mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        <!-- Left Column: Video & Controls -->
+        <div class="lg:col-span-7 space-y-6">
+            
+            <!-- Video Analyzer -->
+            <div class="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden">
+                <div class="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                    <h3 class="font-semibold text-slate-700 flex items-center">
+                        <i data-lucide="ruler" class="w-4 h-4 mr-2"></i> 動作角度測量
+                    </h3>
+                    <label class="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg transition-colors flex items-center">
+                        <i data-lucide="upload" class="w-4 h-4 mr-2"></i> 上傳影片
+                        <input type="file" id="videoUpload" accept="video/*" class="hidden">
+                    </label>
+                </div>
+
+                <div class="aspect-video relative bg-black flex items-center justify-center">
+                    <div id="placeholder" class="text-slate-400 text-center p-8">
+                        <i data-lucide="upload" class="w-12 h-12 mx-auto mb-4 opacity-50"></i>
+                        <p>請上傳工作影片 (MP4/MOV)</p>
+                        <p class="text-sm mt-2 opacity-70">系統將輔助您標記骨架並計算負荷</p>
+                    </div>
+                    <div id="videoContainer" class="hidden w-full h-full relative">
+                        <video id="mainVideo" playsinline></video>
+                        <canvas id="mainCanvas"></canvas>
+                    </div>
+                </div>
+
+                <div class="p-4 flex items-center justify-between bg-slate-50 border-t border-slate-200">
+                    <div class="flex space-x-2">
+                        <button id="btnPlayPause" class="p-2 bg-slate-200 rounded-full hover:bg-slate-300 disabled:opacity-50" disabled>
+                            <i data-lucide="play" class="w-5 h-5"></i>
+                        </button>
+                        <button id="btnReset" class="p-2 bg-slate-200 rounded-full hover:bg-slate-300 text-slate-600" title="重置標記">
+                            <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
+                        </button>
+                    </div>
+                    <div class="text-sm text-slate-600">
+                        <span id="statusText">操作提示: 暫停影片 ➔ 點擊臀部 ➔ 點擊肩膀</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Parameters -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                <h3 class="font-semibold text-slate-700 mb-4 flex items-center">
+                    <i data-lucide="calculator" class="w-4 h-4 mr-2"></i> 作業參數設定
+                </h3>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 mb-1">軀幹彎曲角度 (Trunk Angle)</label>
+                            <div class="flex items-center space-x-4">
+                                <input type="range" id="inputAngle" min="0" max="90" value="0" class="flex-1 h-2 bg-slate-200 rounded-lg">
+                                <span class="w-12 text-right font-mono font-bold text-blue-600"><span id="valAngle">0</span>°</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 mb-1">手中物體重量 (Load Weight)</label>
+                            <div class="flex items-center space-x-4">
+                                <input type="range" id="inputLoad" min="0" max="50" value="10" class="flex-1 h-2 bg-slate-200 rounded-lg">
+                                <span class="w-12 text-right font-mono font-bold text-blue-600"><span id="valLoad">10</span>kg</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 mb-1">作業者體重 (Body Weight)</label>
+                            <div class="flex items-center space-x-4">
+                                <input type="number" id="inputBody" value="70" class="w-full border border-slate-300 rounded px-3 py-1 text-sm">
+                                <span class="text-slate-500 text-sm">kg</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 mb-1">物體離脊椎水平距離 (Distance)</label>
+                            <div class="flex items-center space-x-4">
+                                <input type="number" id="inputDist" value="40" class="w-full border border-slate-300 rounded px-3 py-1 text-sm">
+                                <span class="text-slate-500 text-sm">cm</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column: Results -->
+        <div class="lg:col-span-5 space-y-6">
+            
+            <!-- Score Card -->
+            <div id="scoreCard" class="rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 bg-emerald-500 border-emerald-600">
+                <div class="flex justify-between items-start mb-4">
+                    <div>
+                        <h2 class="text-3xl font-bold"><span id="resCompression">0</span> N</h2>
+                        <p class="text-white/90 text-sm font-medium mt-1">L5/S1 椎間盤預估壓力</p>
+                    </div>
+                    <div class="bg-white/20 p-2 rounded-full backdrop-blur-sm">
+                        <i id="iconStatus" data-lucide="check-circle" class="w-8 h-8"></i>
+                    </div>
+                </div>
+
+                <div class="space-y-2">
+                    <div class="flex justify-between text-sm">
+                        <span class="text-white/80">NIOSH 安全上限:</span>
+                        <span class="font-mono">3,400 N</span>
+                    </div>
+                    <div class="w-full bg-black/20 rounded-full h-2">
+                        <div id="barRisk" class="bg-white h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                    <div class="flex justify-between items-center pt-2">
+                        <span id="textRiskLevel" class="font-bold uppercase tracking-wider text-sm">LOW RISK</span>
+                        <span id="textWarning" class="text-xs bg-white text-red-600 px-2 py-1 rounded font-bold hidden">建議立即改善</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Details -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                <h3 class="font-semibold text-slate-700 mb-4 text-sm uppercase tracking-wide">力學分析細節</h3>
+                <div class="space-y-4 text-sm">
+                    <div class="flex justify-between py-2 border-b border-slate-100">
+                        <span class="text-slate-500">背部肌肉收縮力 (Muscle Force)</span>
+                        <span class="font-mono font-medium"><span id="resMuscle">0</span> N</span>
+                    </div>
+                    <div class="flex justify-between py-2 border-b border-slate-100">
+                        <span class="text-slate-500">上身重力力矩 (Torso Moment)</span>
+                        <span class="font-mono font-medium"><span id="resTorsoM">0</span> Nm</span>
+                    </div>
+                    <div class="flex justify-between py-2 border-b border-slate-100">
+                        <span class="text-slate-500">負重力矩 (Load Moment)</span>
+                        <span class="font-mono font-medium"><span id="resLoadM">0</span> Nm</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                <h3 class="font-semibold text-slate-700 mb-2 text-xs">角度 vs 壓力趨勢圖</h3>
+                <div class="h-64">
+                    <canvas id="chartRisk"></canvas>
+                </div>
+            </div>
+
+            <div class="bg-blue-50 p-4 rounded-lg flex items-start space-x-3">
+                <i data-lucide="info" class="text-blue-500 flex-shrink-0 mt-1 w-5 h-5"></i>
+                <div class="text-xs text-blue-800 leading-relaxed">
+                    <strong>計算原理：</strong> 採用 2D 靜態平面模型。假設背部伸肌力臂為 5cm，上半身重心距離 L5/S1 約 25cm。所有運算皆在本地端執行，影片不會上傳。
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script>
+        // --- 1. State Management & Constants ---
+        const CONSTANTS = {
+            TORSO_WEIGHT_RATIO: 0.6,
+            MUSCLE_MOMENT_ARM: 0.05,
+            TORSO_COM_DIST: 0.25,
+            G: 9.81,
+            NIOSH_LIMIT: 3400
+        };
+
+        const state = {
+            trunkAngle: 0,
+            loadWeight: 10,
+            bodyWeight: 70,
+            loadDistance: 40,
+            videoSrc: null,
+            points: [],
+            isPlaying: false
+        };
+
+        // --- 2. DOM Elements ---
+        const els = {
+            videoUpload: document.getElementById('videoUpload'),
+            mainVideo: document.getElementById('mainVideo'),
+            mainCanvas: document.getElementById('mainCanvas'),
+            placeholder: document.getElementById('placeholder'),
+            videoContainer: document.getElementById('videoContainer'),
+            btnPlayPause: document.getElementById('btnPlayPause'),
+            btnReset: document.getElementById('btnReset'),
+            statusText: document.getElementById('statusText'),
+            inputAngle: document.getElementById('inputAngle'),
+            inputLoad: document.getElementById('inputLoad'),
+            inputBody: document.getElementById('inputBody'),
+            inputDist: document.getElementById('inputDist'),
+            valAngle: document.getElementById('valAngle'),
+            valLoad: document.getElementById('valLoad'),
+            // Results
+            resCompression: document.getElementById('resCompression'),
+            resMuscle: document.getElementById('resMuscle'),
+            resTorsoM: document.getElementById('resTorsoM'),
+            resLoadM: document.getElementById('resLoadM'),
+            scoreCard: document.getElementById('scoreCard'),
+            iconStatus: document.getElementById('iconStatus'),
+            barRisk: document.getElementById('barRisk'),
+            textRiskLevel: document.getElementById('textRiskLevel'),
+            textWarning: document.getElementById('textWarning')
+        };
+
+        // --- 3. Chart Initialization ---
+        let riskChart;
+        function initChart() {
+            const ctx = document.getElementById('chartRisk').getContext('2d');
+            riskChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'L5/S1 壓力 (N)',
+                            data: [],
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'NIOSH 危險線',
+                            data: [],
+                            borderColor: '#ef4444',
+                            borderDash: [5, 5],
+                            pointRadius: 0,
+                            borderWidth: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { title: { display: true, text: '角度 (度)' } },
+                        y: { title: { display: true, text: '壓力 (牛頓)' } }
+                    },
+                    plugins: {
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                        },
+                        annotation: {
+                            annotations: {
+                                line1: {
+                                    type: 'line',
+                                    yMin: 3400,
+                                    yMax: 3400,
+                                    borderColor: 'rgb(255, 99, 132)',
+                                    borderWidth: 2,
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            updateChart();
+        }
+
+        // --- 4. Logic Functions ---
+
+        function calculatePhysics() {
+            const torsoMass = state.bodyWeight * CONSTANTS.TORSO_WEIGHT_RATIO;
+            const loadMass = parseFloat(state.loadWeight);
+            const angleRad = (state.trunkAngle * Math.PI) / 180;
+            const loadDistM = state.loadDistance / 100;
+
+            // Moments
+            const momentTorso = (torsoMass * CONSTANTS.G) * (CONSTANTS.TORSO_COM_DIST * Math.sin(angleRad));
+            const momentLoad = (loadMass * CONSTANTS.G) * (loadDistM + (CONSTANTS.TORSO_COM_DIST * Math.sin(angleRad) * 0.5));
+            const totalMoment = momentTorso + momentLoad;
+
+            // Forces
+            const forceMuscle = totalMoment / CONSTANTS.MUSCLE_MOMENT_ARM;
+            const compTorso = (torsoMass * CONSTANTS.G) * Math.cos(angleRad);
+            const compLoad = (loadMass * CONSTANTS.G) * Math.cos(angleRad);
+            const totalCompression = forceMuscle + compTorso + compLoad;
+
+            return {
+                compression: Math.round(totalCompression),
+                muscle: Math.round(forceMuscle),
+                momentTorso: Math.round(momentTorso),
+                momentLoad: Math.round(momentLoad),
+                risk: totalCompression > 3400 ? 'High' : (totalCompression > 2500 ? 'Medium' : 'Low')
+            };
+        }
+
+        function updateUI() {
+            const res = calculatePhysics();
+            
+            // Update Text Inputs Display
+            els.valAngle.textContent = state.trunkAngle;
+            els.valLoad.textContent = state.loadWeight;
+
+            // Update Results
+            els.resCompression.textContent = res.compression;
+            els.resMuscle.textContent = res.muscle;
+            els.resTorsoM.textContent = res.momentTorso;
+            els.resLoadM.textContent = res.momentLoad;
+
+            // Risk Styling
+            let bgClass = 'bg-emerald-500 border-emerald-600';
+            if (res.risk === 'Medium') bgClass = 'bg-yellow-500 border-yellow-600';
+            if (res.risk === 'High') bgClass = 'bg-red-500 border-red-600';
+            
+            els.scoreCard.className = `rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 ${bgClass}`;
+            
+            // Progress Bar
+            const pct = Math.min((res.compression / 6000) * 100, 100);
+            els.barRisk.style.width = `${pct}%`;
+            
+            els.textRiskLevel.textContent = `${res.risk} RISK`;
+            els.textWarning.style.display = res.risk === 'High' ? 'inline-block' : 'none';
+
+            // Update Chart
+            updateChart();
+        }
+
+        function updateChart() {
+            if (!riskChart) return;
+            
+            const dataPoints = [];
+            const limitPoints = [];
+            const labels = [];
+            
+            for(let i=0; i<=90; i+=10) {
+                const rad = (i * Math.PI) / 180;
+                const tm = (state.bodyWeight * CONSTANTS.TORSO_WEIGHT_RATIO * 9.81) * (CONSTANTS.TORSO_COM_DIST * Math.sin(rad));
+                const lm = (state.loadWeight * 9.81) * ((state.loadDistance/100) + (CONSTANTS.TORSO_COM_DIST * Math.sin(rad) * 0.5));
+                const force = (tm + lm) / CONSTANTS.MUSCLE_MOMENT_ARM;
+                const comp = force + ((state.bodyWeight * CONSTANTS.TORSO_WEIGHT_RATIO * 9.81) * Math.cos(rad)) + ((state.loadWeight * 9.81) * Math.cos(rad));
+                
+                labels.push(i);
+                dataPoints.push(Math.round(comp));
+                limitPoints.push(3400);
+            }
+
+            riskChart.data.labels = labels;
+            riskChart.data.datasets[0].data = dataPoints;
+            riskChart.data.datasets[1].data = limitPoints;
+            riskChart.update();
+        }
+
+        // --- 5. Video & Canvas Logic ---
+
+        function drawCanvas() {
+            const ctx = els.mainCanvas.getContext('2d');
+            ctx.clearRect(0, 0, els.mainCanvas.width, els.mainCanvas.height);
+
+            // Draw points
+            state.points.forEach((p, idx) => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
+                ctx.fillStyle = idx === 0 ? '#3b82f6' : '#ef4444'; // Hip Blue, Shoulder Red
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.stroke();
+                
+                ctx.fillStyle = 'white';
+                ctx.font = '14px sans-serif';
+                ctx.fillText(idx === 0 ? 'Hip' : 'Shoulder', p.x + 10, p.y);
+            });
+
+            // Draw line and angle
+            if (state.points.length === 2) {
+                const p1 = state.points[0];
+                const p2 = state.points[1];
+
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                ctx.strokeStyle = '#fbbf24';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+
+                // Vertical reference
+                ctx.beginPath();
+                ctx.setLineDash([5, 5]);
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p1.x, p1.y - 100);
+                ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Draw Angle
+                ctx.fillStyle = '#fbbf24';
+                ctx.font = 'bold 24px sans-serif';
+                ctx.fillText(`${state.trunkAngle}°`, p1.x + 10, p1.y - 40);
+            }
+        }
+
+        function calculateAngleFromPoints() {
+            if (state.points.length !== 2) return;
+            const p1 = state.points[0]; // Hip
+            const p2 = state.points[1]; // Shoulder
+            
+            const deltaX = p2.x - p1.x;
+            const deltaY = p1.y - p2.y; // Y is inverted in canvas
+            
+            // Angle from vertical (Y axis)
+            let angleDeg = Math.atan2(Math.abs(deltaX), Math.abs(deltaY)) * (180 / Math.PI);
+            angleDeg = Math.round(angleDeg);
+            
+            state.trunkAngle = angleDeg;
+            els.inputAngle.value = angleDeg;
+            els.statusText.innerHTML = `<span class="text-blue-600 font-bold">已測量角度: ${angleDeg}°</span>`;
+            updateUI();
+        }
+
+        // --- 6. Event Listeners ---
+
+        els.videoUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const url = URL.createObjectURL(file);
+            state.videoSrc = url;
+            els.mainVideo.src = url;
+            
+            els.placeholder.classList.add('hidden');
+            els.videoContainer.classList.remove('hidden');
+            els.btnPlayPause.disabled = false;
+            
+            // Reset points
+            state.points = [];
+            state.trunkAngle = 0;
+            els.inputAngle.value = 0;
+            els.statusText.textContent = "操作提示: 暫停影片 ➔ 點擊臀部 ➔ 點擊肩膀";
+            drawCanvas();
+            updateUI();
+        });
+
+        els.mainVideo.addEventListener('loadedmetadata', () => {
+            els.mainCanvas.width = els.mainVideo.videoWidth;
+            els.mainCanvas.height = els.mainVideo.videoHeight;
+        });
+
+        els.btnPlayPause.addEventListener('click', () => {
+            if (state.isPlaying) {
+                els.mainVideo.pause();
+                // Lucide icon replacement manually since re-rendering entire icon set is heavy
+                els.btnPlayPause.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-play"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
+            } else {
+                els.mainVideo.play();
+                els.btnPlayPause.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-pause"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg>';
+            }
+            state.isPlaying = !state.isPlaying;
+        });
+
+        els.mainVideo.addEventListener('ended', () => {
+            state.isPlaying = false;
+            els.btnPlayPause.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-play"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
+        });
+
+        els.btnReset.addEventListener('click', () => {
+            state.points = [];
+            drawCanvas();
+            els.statusText.textContent = "操作提示: 暫停影片 ➔ 點擊臀部 ➔ 點擊肩膀";
+        });
+
+        els.mainCanvas.addEventListener('click', (e) => {
+            const rect = els.mainCanvas.getBoundingClientRect();
+            // Scale click coordinates to canvas actual size
+            const scaleX = els.mainCanvas.width / rect.width;
+            const scaleY = els.mainCanvas.height / rect.height;
+            
+            const x = (e.clientX - rect.left) * scaleX;
+            const y = (e.clientY - rect.top) * scaleY;
+
+            if (state.points.length >= 2) {
+                state.points = [{x, y}]; // Reset and start new
+            } else {
+                state.points.push({x, y});
+            }
+
+            drawCanvas();
+            if (state.points.length === 2) {
+                calculateAngleFromPoints();
+            }
+        });
+
+        // Input Listeners
+        els.inputAngle.addEventListener('input', (e) => {
+            state.trunkAngle = parseInt(e.target.value);
+            state.points = []; // Clear visual points if manual override
+            drawCanvas();
+            updateUI();
+        });
+        els.inputLoad.addEventListener('input', (e) => {
+            state.loadWeight = parseInt(e.target.value);
+            updateUI();
+        });
+        els.inputBody.addEventListener('change', (e) => {
+            state.bodyWeight = parseInt(e.target.value);
+            updateUI();
+        });
+        els.inputDist.addEventListener('change', (e) => {
+            state.loadDistance = parseInt(e.target.value);
+            updateUI();
+        });
+
+        // --- 7. Initialize ---
+        lucide.createIcons();
+        initChart();
+        updateUI();
+
+    </script>
+</body>
+</html>
