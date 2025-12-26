@@ -1,69 +1,134 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Play, Pause, RotateCcw, Activity, AlertTriangle, CheckCircle, Ruler, Calculator, Info } from 'lucide-react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, AreaChart, Area } from 'recharts';
+import { Upload, Play, Pause, RotateCcw, Activity, AlertTriangle, CheckCircle, Ruler, Calculator, Info, Users, Crosshair, Settings2, User, Move } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
 
 const ErgoLiftApp = () => {
   const [activeTab, setActiveTab] = useState('video'); // video or calculator
   
   // --- Physics Constants & State ---
+  const [mode, setMode] = useState('single'); // 'single' or 'team'
   const [bodyWeight, setBodyWeight] = useState(70); // kg
-  const [loadWeight, setLoadWeight] = useState(10); // kg
-  const [trunkAngle, setTrunkAngle] = useState(0); // degrees (flexion)
-  const [loadDistance, setLoadDistance] = useState(40); // cm (horizontal distance from spine)
+  const [bodyHeight, setBodyHeight] = useState(170); // cm
+  const [totalLoad, setTotalLoad] = useState(10); // kg (Total object weight)
+  const [partnerShare, setPartnerShare] = useState(50); // % (How much partner helps)
   
-  // Constant approximations for 2D Biomechanical Model
-  const TORSO_WEIGHT_RATIO = 0.6; // Approx % of body weight above L5/S1
-  const MUSCLE_MOMENT_ARM = 0.05; // 5cm (Distance from erector spinae to pivot)
-  const TORSO_COM_DIST = 0.25; // 25cm (Approx distance to torso center of mass)
+  // Anthropometric Data (Based on Dempster / Winter)
+  const ANTHRO = {
+    forearm: { lenRatio: 0.146, massRatio: 0.016, comRatio: 0.43 }, // Elbow to Wrist
+    upperarm: { lenRatio: 0.186, massRatio: 0.028, comRatio: 0.436 }, // Shoulder to Elbow
+    trunk: { massRatio: 0.578, comRatio: 0.66 } // Head+Arms+Trunk approx
+  };
+  const MOMENT_ARMS = { erectorSpinae: 0.05 }; // 5cm
   
   // --- Video Handling State ---
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [videoSrc, setVideoSrc] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [points, setPoints] = useState([]); // Array of {x, y}
-  const [measuredAngle, setMeasuredAngle] = useState(null);
+  
+  // Points: [Wrist, Elbow, Shoulder, Hip]
+  const [points, setPoints] = useState([]); 
+  
+  const POINT_NAMES = ['手腕 (Wrist)', '手肘 (Elbow)', '肩膀 (Shoulder)', '髖關節 (Hip)'];
+  const POINT_COLORS = ['#fbbf24', '#a855f7', '#3b82f6', '#ef4444']; // Yellow, Purple, Blue, Red
 
-  // --- Calculations ---
+  // --- Calculations (Inverse Dynamics) ---
   const calculationResult = useMemo(() => {
-    // Convert units
-    const torsoMass = bodyWeight * TORSO_WEIGHT_RATIO;
-    const loadMass = parseFloat(loadWeight);
+    // 1. Determine Effective Load
+    const effectiveLoadKg = mode === 'team' 
+        ? totalLoad * (1 - (partnerShare / 100)) 
+        : parseFloat(totalLoad);
+
     const g = 9.81;
-    const angleRad = (trunkAngle * Math.PI) / 180;
-    const loadDistM = loadDistance / 100;
-
-    // 1. Calculate Moments (Torques)
-    // Torque from Upper Body Weight (Torso tries to fall forward)
-    // Moment = Force * perpendicular distance = (Mass * g) * (COM_Dist * sin(theta))
-    const momentTorso = (torsoMass * g) * (TORSO_COM_DIST * Math.sin(angleRad));
     
-    // Torque from External Load
-    const momentLoad = (loadMass * g) * (loadDistM + (TORSO_COM_DIST * Math.sin(angleRad) * 0.5)); 
-    // Simplified assumption: Load moves slightly away as we bend, but primarily defined by loadDistance input
+    // Default / Placeholder values if points are missing
+    if (points.length < 4) {
+        // Fallback for simple calculator mode without video points:
+        // We assume a standard "stoop" lift posture if no video points: 
+        // Trunk 45deg, UpperArm 20deg, Forearm -20deg (approx)
+        // This allows the calculator to show something before video analysis
+        return {
+            totalCompression: 0,
+            sMoment: 0, 
+            eMoment: 0, 
+            l5Moment: 0,
+            riskLevel: 'Low',
+            effectiveLoad: effectiveLoadKg,
+            trunkAng: 0,
+            shoulderAng: 0
+        };
+    }
 
-    const totalMoment = momentTorso + momentLoad;
+    const pW = points[0]; // Wrist
+    const pE = points[1]; // Elbow
+    const pS = points[2]; // Shoulder
+    const pH = points[3]; // Hip
 
-    // 2. Calculate Muscle Force Required to counteract Moment
-    // Force_muscle * 0.05m = Total_Moment
-    const forceMuscle = totalMoment / MUSCLE_MOMENT_ARM;
-
-    // 3. Calculate Total Compression on L5/S1
-    // Compression = Muscle Force + Component of Body Weight + Component of Load Weight
-    // Cosine component acts directly down the spine
-    const compTorso = (torsoMass * g) * Math.cos(angleRad);
-    const compLoad = (loadMass * g) * Math.cos(angleRad);
+    // 2. Geometry & Conversion
+    const H_meters = bodyHeight / 100;
     
-    const totalCompression = forceMuscle + compTorso + compLoad;
+    // Estimated Segment Lengths (Meters) based on body height
+    const L_forearm = H_meters * ANTHRO.forearm.lenRatio;
+    const L_upperarm = H_meters * ANTHRO.upperarm.lenRatio;
+    const L_trunk = H_meters * 0.3; // Approx trunk length (Shoulder to Hip)
+
+    // Calculate Angles relative to vertical (0 is down)
+    // Canvas Y is positive down.
+    const angleForearm = Math.atan2(pW.x - pE.x, pE.y - pW.y); 
+    const angleUpperarm = Math.atan2(pE.x - pS.x, pS.y - pE.y);
+    const angleTrunk = Math.atan2(pS.x - pH.x, pH.y - pS.y);
+
+    // Angles for Display (Degrees)
+    const trunkAngDeg = Math.round(Math.abs(angleTrunk * (180/Math.PI)));
+    const shoulderAngDeg = Math.round(Math.abs(angleUpperarm * (180/Math.PI)));
+
+    // Horizontal Moment Arms (d = L * sin(theta))
+    const d_forearm_load = Math.abs(L_forearm * Math.sin(angleForearm));
+    const d_forearm_com = Math.abs(L_forearm * ANTHRO.forearm.comRatio * Math.sin(angleForearm));
+    
+    const d_upperarm_elbow = Math.abs(L_upperarm * Math.sin(angleUpperarm));
+    const d_upperarm_com = Math.abs(L_upperarm * ANTHRO.upperarm.comRatio * Math.sin(angleUpperarm));
+
+    const d_trunk_shoulder = Math.abs(L_trunk * Math.sin(angleTrunk));
+    const d_trunk_com = Math.abs(L_trunk * 0.5 * Math.sin(angleTrunk)); // Simplified
+
+    // 3. Step-by-Step Moment Calculation (Top-Down)
+    
+    // A. ELBOW MOMENT
+    const F_load = effectiveLoadKg * g;
+    const F_forearm = (bodyWeight * ANTHRO.forearm.massRatio) * g;
+    const M_elbow = (F_load * d_forearm_load) + (F_forearm * d_forearm_com);
+
+    // B. SHOULDER MOMENT
+    const F_elbow_total = F_load + F_forearm; 
+    const F_upperarm = (bodyWeight * ANTHRO.upperarm.massRatio) * g;
+    const M_shoulder = M_elbow + (F_elbow_total * d_upperarm_elbow) + (F_upperarm * d_upperarm_com);
+
+    // C. L5/S1 MOMENT
+    // Mass above L5S1 minus arms (Head + Trunk) approx 50% BW
+    const F_shoulder_total = F_elbow_total + F_upperarm;
+    const F_trunk = (bodyWeight * 0.50) * g; 
+    const M_l5s1 = M_shoulder + (F_shoulder_total * d_trunk_shoulder) + (F_trunk * d_trunk_com);
+
+    // 4. Compression
+    const F_muscle = M_l5s1 / MOMENT_ARMS.erectorSpinae;
+    // Component of weight acting parallel to spine (Compression)
+    const Total_Mass_Above = effectiveLoadKg + (bodyWeight * 0.6);
+    const F_gravity_comp = (Total_Mass_Above * g) * Math.cos(angleTrunk);
+    
+    const totalCompression = F_muscle + F_gravity_comp;
     
     return {
       totalCompression: Math.round(totalCompression),
-      muscleForce: Math.round(forceMuscle),
+      sMoment: Math.round(M_shoulder),
+      eMoment: Math.round(M_elbow),
+      l5Moment: Math.round(M_l5s1),
       riskLevel: totalCompression > 3400 ? 'High' : (totalCompression > 2500 ? 'Medium' : 'Low'),
-      momentTorso: Math.round(momentTorso),
-      momentLoad: Math.round(momentLoad)
+      effectiveLoad: effectiveLoadKg.toFixed(1),
+      trunkAng: trunkAngDeg,
+      shoulderAng: shoulderAngDeg
     };
-  }, [bodyWeight, loadWeight, trunkAngle, loadDistance]);
+  }, [mode, totalLoad, partnerShare, bodyWeight, bodyHeight, points]);
 
   // --- Handlers ---
 
@@ -73,7 +138,6 @@ const ErgoLiftApp = () => {
       const url = URL.createObjectURL(file);
       setVideoSrc(url);
       setPoints([]);
-      setMeasuredAngle(null);
     }
   };
 
@@ -87,40 +151,18 @@ const ErgoLiftApp = () => {
 
   const handleCanvasClick = (e) => {
     if (!videoSrc) return;
-    
-    // Get coordinates relative to canvas
+    if (points.length >= 4) return; // Max 4 points
+
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
     const newPoints = [...points, { x, y }];
-    
-    if (newPoints.length > 2) {
-      // Reset if trying to add more than 2 points (Hip, Shoulder)
-      setPoints([{ x, y }]);
-      setMeasuredAngle(null);
-    } else {
-      setPoints(newPoints);
-      
-      if (newPoints.length === 2) {
-        // Calculate Angle
-        // Point 1: Hip (Pivot), Point 2: Shoulder
-        const p1 = newPoints[0];
-        const p2 = newPoints[1];
-        
-        // Calculate angle relative to vertical (0 degrees is standing straight up)
-        const deltaX = p2.x - p1.x;
-        const deltaY = p1.y - p2.y; // Y is inverted in canvas
-        
-        // Atan2 gives angle from X axis. We want angle from Y axis (vertical).
-        // Vertical vector is (0, 1). 
-        // Simple geometry: 
-        let angleDeg = Math.atan2(Math.abs(deltaX), Math.abs(deltaY)) * (180 / Math.PI);
-        
-        setMeasuredAngle(Math.round(angleDeg));
-        setTrunkAngle(Math.round(angleDeg)); // Auto-update the calculator
-      }
-    }
+    setPoints(newPoints);
+  };
+
+  const resetPoints = () => {
+      setPoints([]);
   };
 
   // Draw overlay
@@ -129,11 +171,25 @@ const ErgoLiftApp = () => {
     const ctx = canvasRef.current.getContext('2d');
     ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
 
-    // Draw points
+    // Draw Lines
+    if (points.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        for(let i=1; i<points.length; i++) {
+            ctx.lineTo(points[i].x, points[i].y);
+        }
+        ctx.strokeStyle = '#fbbf24'; // Amber-400
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+    }
+
+    // Draw Points
     points.forEach((p, index) => {
       ctx.beginPath();
       ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
-      ctx.fillStyle = index === 0 ? '#3b82f6' : '#ef4444'; // Blue for hip, Red for shoulder
+      ctx.fillStyle = POINT_COLORS[index];
       ctx.fill();
       ctx.strokeStyle = 'white';
       ctx.stroke();
@@ -141,37 +197,15 @@ const ErgoLiftApp = () => {
       // Label
       ctx.fillStyle = 'white';
       ctx.font = '12px sans-serif';
-      ctx.fillText(index === 0 ? '髖關節 (Hip)' : '肩膀 (Shoulder)', p.x + 10, p.y);
+      ctx.shadowColor = "rgba(0,0,0,0.5)";
+      ctx.shadowBlur = 4;
+      ctx.fillText(POINT_NAMES[index], p.x + 10, p.y);
+      ctx.shadowBlur = 0;
     });
 
-    // Draw Line
-    if (points.length === 2) {
-      ctx.beginPath();
-      ctx.moveTo(points[0].x, points[0].y);
-      ctx.lineTo(points[1].x, points[1].y);
-      ctx.strokeStyle = '#fbbf24';
-      ctx.lineWidth = 3;
-      ctx.stroke();
+  }, [points, videoSrc]);
 
-      // Draw Vertical Reference
-      ctx.beginPath();
-      ctx.setLineDash([5, 5]);
-      ctx.moveTo(points[0].x, points[0].y);
-      ctx.lineTo(points[0].x, points[0].y - 100);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-      ctx.stroke();
-      ctx.setLineDash([]);
-      
-      // Draw Angle text
-      if (measuredAngle !== null) {
-        ctx.fillStyle = '#fbbf24';
-        ctx.font = 'bold 24px sans-serif';
-        ctx.fillText(`${measuredAngle}°`, points[0].x + 10, points[0].y - 40);
-      }
-    }
-  }, [points, measuredAngle, videoSrc]);
-
-  // Sync video size to canvas
+  // Sync video size
   const handleLoadedMetadata = () => {
     if (videoRef.current && canvasRef.current) {
       canvasRef.current.width = videoRef.current.videoWidth;
@@ -179,25 +213,12 @@ const ErgoLiftApp = () => {
     }
   };
 
-
-  // --- Visualization Data for Chart ---
-  const riskData = useMemo(() => {
-    const data = [];
-    for (let i = 0; i <= 90; i+=5) {
-        // Recalculate simply for graph
-        const rad = (i * Math.PI) / 180;
-        const tm = (bodyWeight * TORSO_WEIGHT_RATIO * 9.81) * (TORSO_COM_DIST * Math.sin(rad));
-        const lm = (loadWeight * 9.81) * ((loadDistance/100) + (TORSO_COM_DIST * Math.sin(rad) * 0.5));
-        const force = (tm + lm) / MUSCLE_MOMENT_ARM;
-        const comp = force + ((bodyWeight * TORSO_WEIGHT_RATIO * 9.81) * Math.cos(rad)) + ((loadWeight * 9.81) * Math.cos(rad));
-        data.push({
-            angle: i,
-            compression: Math.round(comp),
-            limit: 3400
-        });
-    }
-    return data;
-  }, [bodyWeight, loadWeight, loadDistance]);
+  // Chart Data
+  const chartData = [
+    { name: '手肘 (Elbow)', moment: calculationResult.eMoment, fill: '#a855f7' },
+    { name: '肩膀 (Shoulder)', moment: calculationResult.sMoment, fill: '#3b82f6' },
+    { name: '腰椎 (L5/S1)', moment: calculationResult.l5Moment, fill: '#10b981' },
+  ];
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
@@ -205,10 +226,10 @@ const ErgoLiftApp = () => {
       <header className="bg-slate-900 text-white p-4 shadow-md flex items-center justify-between">
         <div className="flex items-center space-x-2">
           <Activity className="text-blue-400" />
-          <h1 className="text-xl font-bold">ErgoLift 智慧人因負荷分析儀</h1>
+          <h1 className="text-xl font-bold">ErgoLift Pro <span className="text-xs bg-blue-600 px-2 py-0.5 rounded ml-2">v2.0</span></h1>
         </div>
         <div className="text-xs text-slate-400">
-          基於 2D 平面生物力學模型 (L5/S1 Compression)
+          多關節逆動力學分析 (Inverse Dynamics)
         </div>
       </header>
 
@@ -237,11 +258,11 @@ const ErgoLiftApp = () => {
 
           {/* Video Analyzer Interface */}
           {activeTab === 'video' && (
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden">
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden relative">
               <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <h3 className="font-semibold text-slate-700 flex items-center">
-                  <Ruler className="w-4 h-4 mr-2" />
-                  動作角度測量
+                  <Crosshair className="w-4 h-4 mr-2" />
+                  骨架標記 ({points.length}/4)
                 </h3>
                 <label className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg transition-colors flex items-center">
                   <Upload size={16} className="mr-2" />
@@ -250,12 +271,12 @@ const ErgoLiftApp = () => {
                 </label>
               </div>
 
-              <div className="relative bg-black aspect-video flex items-center justify-center overflow-hidden">
+              <div className="relative bg-black aspect-video flex items-center justify-center overflow-hidden group">
                 {!videoSrc ? (
                   <div className="text-slate-400 text-center p-8">
-                    <Upload size={48} className="mx-auto mb-4 opacity-50" />
-                    <p>請上傳工作影片 (MP4/MOV)</p>
-                    <p className="text-sm mt-2 opacity-70">系統將輔助您標記骨架並計算負荷</p>
+                    <Users size={48} className="mx-auto mb-4 opacity-50" />
+                    <p>支援雙人搬運 & 多關節分析</p>
+                    <p className="text-sm mt-2 opacity-70">上傳後請依序點擊: 手腕 ➔ 手肘 ➔ 肩膀 ➔ 髖部</p>
                   </div>
                 ) : (
                   <div className="relative w-full h-full">
@@ -272,6 +293,13 @@ const ErgoLiftApp = () => {
                       className="absolute inset-0 w-full h-full cursor-crosshair z-10"
                       onClick={handleCanvasClick}
                     />
+                    
+                    {/* Floating Guide */}
+                    {points.length < 4 && (
+                        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-black/70 text-white px-4 py-2 rounded-full text-sm font-bold backdrop-blur-sm pointer-events-none transition-all border border-white/20">
+                            請點擊: <span style={{color: POINT_COLORS[points.length]}}>{POINT_NAMES[points.length]}</span>
+                        </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -281,19 +309,13 @@ const ErgoLiftApp = () => {
                   <button onClick={togglePlay} disabled={!videoSrc} className="p-2 bg-slate-200 rounded-full hover:bg-slate-300 disabled:opacity-50">
                     {isPlaying ? <Pause size={20} /> : <Play size={20} />}
                   </button>
-                  <button onClick={() => {
-                    setPoints([]);
-                    setMeasuredAngle(null);
-                  }} className="p-2 bg-slate-200 rounded-full hover:bg-slate-300 text-slate-600" title="重置標記">
+                  <button onClick={resetPoints} className="p-2 bg-slate-200 rounded-full hover:bg-slate-300 text-slate-600" title="重置標記">
                     <RotateCcw size={20} />
                   </button>
                 </div>
-                <div className="text-sm text-slate-600">
-                  {measuredAngle ? (
-                    <span className="font-bold text-blue-600 text-lg">已測量角度: {measuredAngle}°</span>
-                  ) : (
-                    <span>操作提示: 暫停影片 ➔ 點擊臀部 ➔ 點擊肩膀</span>
-                  )}
+                <div className="text-sm text-slate-600 text-right">
+                    <div className="text-xs text-slate-400">當前模式</div>
+                    <div className="font-bold text-blue-600">{mode === 'single' ? '單人作業' : '雙人協作'}</div>
                 </div>
               </div>
             </div>
@@ -301,40 +323,54 @@ const ErgoLiftApp = () => {
 
           {/* Manual Input Interface */}
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-            <h3 className="font-semibold text-slate-700 mb-4 flex items-center">
-              <Calculator className="w-4 h-4 mr-2" />
-              作業參數設定
-            </h3>
+            <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-slate-700 flex items-center">
+                <Settings2 className="w-4 h-4 mr-2" />
+                參數設定
+                </h3>
+                <div className="flex bg-slate-100 p-1 rounded-lg">
+                    <button 
+                        onClick={() => setMode('single')}
+                        className={`px-3 py-1 text-sm rounded-md transition-all ${mode === 'single' ? 'bg-white shadow text-blue-600 font-bold' : 'text-slate-500 hover:text-slate-700'}`}
+                    >單人</button>
+                    <button 
+                        onClick={() => setMode('team')}
+                        className={`px-3 py-1 text-sm rounded-md transition-all ${mode === 'team' ? 'bg-white shadow text-purple-600 font-bold' : 'text-slate-500 hover:text-slate-700'}`}
+                    >雙人協作</button>
+                </div>
+            </div>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">軀幹彎曲角度 (Trunk Angle)</label>
+                <div className={`p-3 rounded-lg border ${mode === 'team' ? 'bg-purple-50 border-purple-100' : 'bg-blue-50 border-blue-100'}`}>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
+                      {mode === 'team' ? '總負重 (Total Weight)' : '手中物體重量 (Load Weight)'}
+                  </label>
                   <div className="flex items-center space-x-4">
                     <input 
-                      type="range" min="0" max="90" value={trunkAngle} 
-                      onChange={(e) => setTrunkAngle(Number(e.target.value))}
-                      className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                      type="range" min="0" max="150" value={totalLoad} 
+                      onChange={(e) => setTotalLoad(Number(e.target.value))}
+                      className={`flex-1 h-2 rounded-lg appearance-none cursor-pointer ${mode === 'team' ? 'bg-purple-200 accent-purple-600' : 'bg-blue-200 accent-blue-600'}`}
                     />
-                    <span className="w-12 text-right font-mono font-bold text-blue-600">{trunkAngle}°</span>
-                  </div>
-                  <p className="text-xs text-slate-400 mt-1">來自影片測量或手動調整</p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">手中物體重量 (Load Weight)</label>
-                  <div className="flex items-center space-x-4">
-                    <input 
-                      type="range" min="0" max="50" value={loadWeight} 
-                      onChange={(e) => setLoadWeight(Number(e.target.value))}
-                      className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                    />
-                    <span className="w-12 text-right font-mono font-bold text-blue-600">{loadWeight}kg</span>
+                    <span className="w-16 text-right font-mono font-bold text-slate-700">{totalLoad}kg</span>
                   </div>
                 </div>
-              </div>
 
-              <div className="space-y-4">
+                {mode === 'team' && (
+                    <div className="p-3 bg-purple-50 rounded-lg border border-purple-100">
+                        <label className="block text-sm font-bold text-purple-800 mb-1">夥伴分擔比例 (Partner Share)</label>
+                        <div className="flex items-center space-x-4">
+                            <input 
+                            type="range" min="0" max="100" value={partnerShare} 
+                            onChange={(e) => setPartnerShare(Number(e.target.value))}
+                            className="flex-1 h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
+                            />
+                            <span className="w-16 text-right font-mono font-bold text-purple-700">{partnerShare}%</span>
+                        </div>
+                        <p className="text-xs text-purple-600 mt-1">此人實際負重: <strong>{calculationResult.effectiveLoad} kg</strong></p>
+                    </div>
+                )}
+
                 <div>
                   <label className="block text-sm font-medium text-slate-600 mb-1">作業者體重 (Body Weight)</label>
                   <div className="flex items-center space-x-4">
@@ -346,17 +382,33 @@ const ErgoLiftApp = () => {
                     <span className="text-slate-500 text-sm">kg</span>
                   </div>
                 </div>
+              </div>
 
+              <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">物體離脊椎水平距離 (Distance)</label>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">身高 (Height) <span className="text-xs text-slate-400">- 估算臂長用</span></label>
                   <div className="flex items-center space-x-4">
                     <input 
-                      type="number" value={loadDistance} 
-                      onChange={(e) => setLoadDistance(Number(e.target.value))}
+                      type="number" value={bodyHeight} 
+                      onChange={(e) => setBodyHeight(Number(e.target.value))}
                       className="w-full border border-slate-300 rounded px-3 py-1 text-sm"
                     />
                     <span className="text-slate-500 text-sm">cm</span>
                   </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100">
+                    <h4 className="text-xs font-semibold text-slate-500 uppercase mb-2">自動偵測角度</h4>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div className="bg-slate-50 p-2 rounded">
+                            <span className="block text-xs text-slate-400">軀幹前彎</span>
+                            <span className="font-mono font-bold text-slate-700">{calculationResult.trunkAng}°</span>
+                        </div>
+                        <div className="bg-slate-50 p-2 rounded">
+                            <span className="block text-xs text-slate-400">上臂抬舉</span>
+                            <span className="font-mono font-bold text-slate-700">{calculationResult.shoulderAng}°</span>
+                        </div>
+                    </div>
                 </div>
               </div>
             </div>
@@ -367,92 +419,94 @@ const ErgoLiftApp = () => {
         <div className="lg:col-span-5 space-y-6">
           
           {/* Main Score Card */}
-          <div className={`rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 ${
+          <div className={`rounded-xl shadow-lg border p-6 text-white transition-colors duration-500 relative overflow-hidden ${
             calculationResult.riskLevel === 'High' ? 'bg-red-500 border-red-600' : 
             calculationResult.riskLevel === 'Medium' ? 'bg-yellow-500 border-yellow-600' : 
             'bg-emerald-500 border-emerald-600'
           }`}>
-            <div className="flex justify-between items-start mb-4">
-              <div>
-                <h2 className="text-3xl font-bold">{calculationResult.totalCompression} N</h2>
-                <p className="text-white/90 text-sm font-medium mt-1">L5/S1 椎間盤預估壓力</p>
-              </div>
-              <div className="bg-white/20 p-2 rounded-full backdrop-blur-sm">
-                 {calculationResult.riskLevel === 'High' ? <AlertTriangle size={32} /> : <CheckCircle size={32} />}
-              </div>
-            </div>
+            <div className="relative z-10">
+                <div className="flex justify-between items-start mb-4">
+                <div>
+                    <h2 className="text-3xl font-bold">{calculationResult.totalCompression} N</h2>
+                    <p className="text-white/90 text-sm font-medium mt-1">L5/S1 椎間盤預估壓力</p>
+                </div>
+                <div className="bg-white/20 p-2 rounded-full backdrop-blur-sm">
+                    {calculationResult.riskLevel === 'High' ? <AlertTriangle size={32} /> : <CheckCircle size={32} />}
+                </div>
+                </div>
 
-            <div className="space-y-2">
-              <div className="flex justify-between text-sm">
-                <span className="text-white/80">NIOSH 安全上限:</span>
-                <span className="font-mono">3,400 N</span>
-              </div>
-              <div className="w-full bg-black/20 rounded-full h-2">
-                <div 
-                  className="bg-white h-2 rounded-full transition-all duration-500"
-                  style={{ width: `${Math.min((calculationResult.totalCompression / 6000) * 100, 100)}%` }}
-                ></div>
-              </div>
-              <div className="flex justify-between items-center pt-2">
-                <span className="font-bold uppercase tracking-wider text-sm">{calculationResult.riskLevel} RISK</span>
-                {calculationResult.riskLevel === 'High' && (
-                  <span className="text-xs bg-white text-red-600 px-2 py-1 rounded font-bold">建議立即改善</span>
-                )}
-              </div>
+                <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                    <span className="text-white/80">NIOSH 安全上限:</span>
+                    <span className="font-mono">3,400 N</span>
+                </div>
+                <div className="w-full bg-black/20 rounded-full h-2">
+                    <div 
+                    className="bg-white h-2 rounded-full transition-all duration-500"
+                    style={{ width: `${Math.min((calculationResult.totalCompression / 6000) * 100, 100)}%` }}
+                    ></div>
+                </div>
+                <div className="flex justify-between items-center pt-2">
+                    <span className="font-bold uppercase tracking-wider text-sm">{calculationResult.riskLevel} RISK</span>
+                </div>
+                </div>
             </div>
           </div>
 
-          {/* Details Panel */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-            <h3 className="font-semibold text-slate-700 mb-4 text-sm uppercase tracking-wide">力學分析細節</h3>
-            <div className="space-y-4 text-sm">
-              <div className="flex justify-between py-2 border-b border-slate-100">
-                <span className="text-slate-500">背部肌肉收縮力 (Muscle Force)</span>
-                <span className="font-mono font-medium">{calculationResult.muscleForce} N</span>
-              </div>
-              <div className="flex justify-between py-2 border-b border-slate-100">
-                <span className="text-slate-500">上身重力力矩 (Torso Moment)</span>
-                <span className="font-mono font-medium">{calculationResult.momentTorso} Nm</span>
-              </div>
-              <div className="flex justify-between py-2 border-b border-slate-100">
-                <span className="text-slate-500">負重力矩 (Load Moment)</span>
-                <span className="font-mono font-medium">{calculationResult.momentLoad} Nm</span>
-              </div>
-            </div>
+          {/* Multi-Joint Cards */}
+          <div className="grid grid-cols-2 gap-4">
+                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                    <div className="flex justify-between items-start mb-1">
+                        <h3 className="text-xs font-bold text-slate-500 uppercase">肩關節力矩</h3>
+                        <User className="w-4 h-4 text-slate-400" />
+                    </div>
+                    <div className="flex items-baseline space-x-1">
+                        <span className="text-2xl font-bold text-slate-700">{calculationResult.sMoment}</span>
+                        <span className="text-xs text-slate-500">Nm</span>
+                    </div>
+                </div>
+                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                    <div className="flex justify-between items-start mb-1">
+                        <h3 className="text-xs font-bold text-slate-500 uppercase">肘關節力矩</h3>
+                        <Move className="w-4 h-4 text-slate-400" />
+                    </div>
+                    <div className="flex items-baseline space-x-1">
+                        <span className="text-2xl font-bold text-slate-700">{calculationResult.eMoment}</span>
+                        <span className="text-xs text-slate-500">Nm</span>
+                    </div>
+                </div>
           </div>
 
           {/* Chart */}
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 h-64">
-            <h3 className="font-semibold text-slate-700 mb-2 text-xs">角度 vs 壓力趨勢圖</h3>
+            <h3 className="font-semibold text-slate-700 mb-2 text-xs">各部位力矩分佈 (Joint Moments)</h3>
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={riskData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="colorComp" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/>
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
+              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                <XAxis dataKey="angle" tick={{fontSize: 10}} label={{ value: '角度', position: 'insideBottomRight', offset: -5, fontSize: 10 }} />
-                <YAxis tick={{fontSize: 10}} />
+                <XAxis dataKey="name" tick={{fontSize: 10}} />
+                <YAxis tick={{fontSize: 10}} label={{ value: '力矩 (Nm)', angle: -90, position: 'insideLeft', fontSize: 10 }} />
                 <Tooltip 
+                  cursor={{fill: 'transparent'}}
                   contentStyle={{backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '12px'}}
-                  formatter={(value) => [`${value} N`, '壓力']}
                 />
-                <ReferenceLine y={3400} stroke="red" strokeDasharray="3 3" label={{ value: '危險線', position: 'insideTopRight', fill: 'red', fontSize: 10 }} />
-                <Area type="monotone" dataKey="compression" stroke="#3b82f6" fillOpacity={1} fill="url(#colorComp)" />
-                {/* Current Position Dot */}
-                <ReferenceLine x={trunkAngle} stroke="#fbbf24" strokeWidth={2} label={{ value: '目前', fill: '#fbbf24', fontSize: 10 }} />
-              </AreaChart>
+                <Bar dataKey="moment" radius={[4, 4, 0, 0]}>
+                    {chartData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.fill} />
+                    ))}
+                </Bar>
+              </BarChart>
             </ResponsiveContainer>
           </div>
           
           <div className="bg-blue-50 p-4 rounded-lg flex items-start space-x-3">
              <Info className="text-blue-500 flex-shrink-0 mt-1" size={18} />
              <div className="text-xs text-blue-800 leading-relaxed">
-               <strong>計算原理：</strong> 採用 2D 靜態平面模型。假設背部伸肌力臂為 5cm，上半身重心距離 L5/S1 約 25cm。公式考慮了身體自重產生的力矩以及外在負重產生的力矩。
-               <br/><br/>
-               <em className="opacity-70">免責聲明：此工具僅供人因工程初步評估，不可替代專業醫療診斷。</em>
+               <strong>計算原理：</strong> 採用由外向內 (Top-Down) 的逆動力學計算。
+               <ul className="list-disc pl-4 mt-1 opacity-80">
+                   <li>手部受力 ➔ 計算肘部力矩</li>
+                   <li>肘部力矩 + 上臂重 ➔ 計算肩部力矩</li>
+                   <li>肩部力矩 + 軀幹重 ➔ 計算腰椎力矩</li>
+               </ul>
              </div>
           </div>
 
